@@ -56,42 +56,46 @@ echo -e "${CYAN} IP: ${WEB_IP}/${WEB_MASK} | Gateway: ${WEB_GATEWAY}${NC}"
 echo -e "${CYAN}============================================================${NC}"
 echo ""
 
+# ===========================================================================
+# Identificar el adaptador puente ANTES de usarlo en cualquier paso.
+# El adaptador puente en Ubuntu suele llamarse enp0s8 o enp0s3 segun el orden.
+# Vagrant usa enp0s3 para NAT y enp0s8 para redes adicionales.
+# Identificamos el adaptador puente (el que no es el de NAT 10.0.2.x).
+# ===========================================================================
+BRIDGE_IFACE=""
+for iface in $(ls /sys/class/net | grep -v lo); do
+    iface_ip=$(ip addr show "$iface" 2>/dev/null | grep 'inet ' | awk '{print $2}' | cut -d/ -f1 || true)
+    if [[ -n "$iface_ip" && "$iface_ip" != "10.0.2"* ]]; then
+        BRIDGE_IFACE="$iface"
+        break
+    fi
+    # Si el adaptador no tiene IP aun, puede ser el puente
+    if [[ -z "$iface_ip" && "$iface" != "lo" ]]; then
+        BRIDGE_IFACE="$iface"
+    fi
+done
+
+# Fallback: usar enp0s8 que es el nombre comun del segundo adaptador en VirtualBox
+if [[ -z "$BRIDGE_IFACE" ]]; then
+    BRIDGE_IFACE="enp0s8"
+    warn "No se identifico el adaptador puente automaticamente. Usando $BRIDGE_IFACE."
+fi
+
+info "Adaptador puente detectado: $BRIDGE_IFACE"
+
 
 # ===========================================================================
 # PASO 0: Esperar a que el DNS esté disponible (DC puede tardar en levantarse)
 # ===========================================================================
-info "PASO 0: Validando conectividad de red..."
+info "PASO 0: Activando el adaptador puente..."
 
-# Verificar que tenemos IP en la interfaz
-RETRY_COUNT=0
-while ! ip addr show "$BRIDGE_IFACE" | grep -q "inet "; do
-    if [ $RETRY_COUNT -ge 30 ]; then
-        err "La interfaz $BRIDGE_IFACE no obtuvo IP después de 60 segundos."
-        exit 1
-    fi
-    info "Esperando IP en $BRIDGE_IFACE... ($RETRY_COUNT/30)"
-    sleep 2
-    RETRY_COUNT=$((RETRY_COUNT + 1))
-done
-log "Interfaz $BRIDGE_IFACE obtuvo conectividad (IP asignada por router/DHCP)."
-
-# Intentar alcanzar el gateway (router Cisco)
-RETRY_COUNT=0
-while [ $RETRY_COUNT -lt 10 ]; do
-    if ping -c 1 -W 1 "$WEB_GATEWAY" &>/dev/null; then
-        log "Gateway $WEB_GATEWAY está accesible."
-        break
-    fi
-    info "Gateway $WEB_GATEWAY no accesible. Reintentando... ($RETRY_COUNT/10)"
-    sleep 2
-    RETRY_COUNT=$((RETRY_COUNT + 1))
-done
-
-if [ $RETRY_COUNT -eq 10 ]; then
-    warn "⚠️  ADVERTENCIA: Gateway $WEB_GATEWAY no está accesible tras 10 intentos."
-    warn "Si el Router Cisco ISR4321 no está activo, NO habrá internet."
-    warn "Los paquetes se instalarán solo si el repositorio de caché local está disponible."
-fi
+# En las cajas Vagrant de Ubuntu, la segunda interfaz (adaptador puente) viene
+# administrativamente apagada hasta que algo la activa. La configuracion real
+# de IP ocurre en el PASO 3 (netplan); aqui solo la encendemos y seguimos.
+ip link set dev "$BRIDGE_IFACE" up 2>/dev/null || warn "No se pudo forzar 'up' en $BRIDGE_IFACE (puede requerir netplan)."
+sleep 2
+LINK_STATE=$(cat "/sys/class/net/${BRIDGE_IFACE}/operstate" 2>/dev/null || echo "unknown")
+info "Estado de $BRIDGE_IFACE tras activarla: $LINK_STATE (se confirmara despues de configurar la IP en el PASO 3)."
 
 
 # ===========================================================================
@@ -131,28 +135,6 @@ log "Paquetes base instalados."
 # Identificamos el adaptador puente (el que no es el de NAT 10.0.2.x).
 # ===========================================================================
 info "PASO 3: Configurando IP fija ${WEB_IP}/${WEB_MASK}..."
-
-# Identificar el adaptador puente (no es el adaptador NAT de Vagrant 10.0.2.15)
-BRIDGE_IFACE=""
-for iface in $(ls /sys/class/net | grep -v lo); do
-    iface_ip=$(ip addr show "$iface" 2>/dev/null | grep 'inet ' | awk '{print $2}' | cut -d/ -f1 || true)
-    if [[ -n "$iface_ip" && "$iface_ip" != "10.0.2"* ]]; then
-        BRIDGE_IFACE="$iface"
-        break
-    fi
-    # Si el adaptador no tiene IP aun, puede ser el puente
-    if [[ -z "$iface_ip" && "$iface" != "lo" ]]; then
-        BRIDGE_IFACE="$iface"
-    fi
-done
-
-# Fallback: usar enp0s8 que es el nombre comun del segundo adaptador en VirtualBox
-if [[ -z "$BRIDGE_IFACE" ]]; then
-    BRIDGE_IFACE="enp0s8"
-    warn "No se identifico el adaptador puente automaticamente. Usando $BRIDGE_IFACE."
-fi
-
-info "Adaptador puente detectado: $BRIDGE_IFACE"
 
 # Verificar si la IP ya esta configurada
 CURRENT_IP=$(ip addr show "$BRIDGE_IFACE" 2>/dev/null | grep "inet ${WEB_IP}" | awk '{print $2}' | cut -d/ -f1 || true)
@@ -207,6 +189,24 @@ EOF
     fi
 fi
 
+# Ahora que la IP esta configurada, intentar alcanzar el gateway (router Cisco)
+RETRY_COUNT=0
+while [ $RETRY_COUNT -lt 10 ]; do
+    if ping -c 1 -W 1 "$WEB_GATEWAY" &>/dev/null; then
+        log "Gateway $WEB_GATEWAY está accesible."
+        break
+    fi
+    info "Gateway $WEB_GATEWAY no accesible. Reintentando... ($RETRY_COUNT/10)"
+    sleep 2
+    RETRY_COUNT=$((RETRY_COUNT + 1))
+done
+
+if [ $RETRY_COUNT -eq 10 ]; then
+    warn "⚠️  ADVERTENCIA: Gateway $WEB_GATEWAY no está accesible tras 10 intentos."
+    warn "Si el adaptador puente no esta bien conectado a una red con salida, NO habrá internet."
+    warn "El aprovisionamiento continuará; verifica manualmente la conectividad si algo falla más adelante."
+fi
+
 
 # ===========================================================================
 # PASO 4: Instalar Apache2 y configurar el sitio web
@@ -228,7 +228,7 @@ LogFormat "%h %l %u %t \"%r\" %>s %O \"%{Referer}i\" \"%{User-Agent}i\" %D" comb
 LogFormat "%{%Y-%m-%dT%H:%M:%S%z}t %h \"%r\" %>s %b" json_like
 
 # Aumentar nivel de log para capturar mas eventos
-LogLevel info ssl:warn
+LogLevel info
 
 EOF
 a2enconf siem-logging 2>/dev/null
@@ -418,7 +418,7 @@ EOF
 a2enmod headers 2>/dev/null
 a2ensite empresa-siem 2>/dev/null
 a2dissite 000-default 2>/dev/null || true
-systemctl reload apache2
+systemctl restart apache2
 log "Sitio web configurado en /var/www/html. Logs en /var/log/apache2/"
 
 
@@ -468,8 +468,8 @@ else
             --import
     chmod 644 /usr/share/keyrings/wazuh.gpg
 
-    # Agregar el repositorio de Wazuh
-    echo "deb [signed-by=/usr/share/keyrings/wazuh.gpg] https://packages.wazuh.com/${WAZUH_VERSION}/apt/ stable main" \
+    # Agregar el repositorio de Wazuh (CORRECCIÓN: Usar 4.x)
+    echo "deb [signed-by=/usr/share/keyrings/wazuh.gpg] https://packages.wazuh.com/4.x/apt/ stable main" \
         | tee /etc/apt/sources.list.d/wazuh.list
 
     # Instalar el paquete del agente

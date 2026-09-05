@@ -1,152 +1,294 @@
 # =============================================================================
-# windows-dc.ps1  |  FASE 1 - Controlador de Dominio
-# Proyecto SIEM - Integrante B | VLAN 10 | 192.168.10.20
-# =============================================================================
-# Este script se ejecuta ANTES del primer reinicio. Realiza:
-#   1. Configuración de hostname y zona horaria (NTP requiere internet)
-#   2. Asignación de IP fija (192.168.10.20/24) en el adaptador puente
-#   3. Instalación de AD DS + DNS (requiere internet si es primera vez)
-#   4. Promoción del servidor como Controlador de Dominio (empresa.local)
-#
-# REQUISITO: El Router Cisco ISR4321 debe estar activo en 192.168.10.1
-#            para que pueda alcanzar internet (NTP, descargas, etc.)
-# (El reinicio lo gestiona el plugin vagrant-reload del Vagrantfile)
+# windows-dc.ps1
+# FASE 1 - Controlador de Dominio Windows Server 2019
 # =============================================================================
 
-$ErrorActionPreference = 'Stop'
-$ProgressPreference    = 'SilentlyContinue'   # Acelera Invoke-WebRequest
+$ErrorActionPreference = "Stop"
+$ProgressPreference = "SilentlyContinue"
 
-# ---------------------------------------------------------------------------
-# VARIABLES GLOBALES - Inyectadas desde el Vagrantfile
-# ---------------------------------------------------------------------------
-$VM_IP          = $env:VM_IP           # Por defecto: 192.168.10.20
-$VM_GATEWAY     = $env:VM_GATEWAY      # Por defecto: 192.168.10.1
-$SIEM_IP        = $env:SIEM_IP         # Por defecto: 192.168.30.10 (VLAN 30)
-$DOMAIN_NAME    = $env:DOMAIN          # Por defecto: empresa.local
-
-$DC_IP          = if ($VM_IP) { $VM_IP } else { "192.168.10.20" }
-$DC_SUBNET      = 24
-$DC_GATEWAY     = if ($VM_GATEWAY) { $VM_GATEWAY } else { "192.168.10.1" }
-$DC_DNS_SELF    = "127.0.0.1"
-$NETBIOS_NAME   = "EMPRESA"
-$SAFEMODE_PASS  = ConvertTo-SecureString "P@ssw0rd" -AsPlainText -Force
-$HOSTNAME       = "dc-empresa"
-
-# ---------------------------------------------------------------------------
-Write-Host "============================================================" -ForegroundColor Cyan
-Write-Host " FASE 1: Instalacion del Controlador de Dominio" -ForegroundColor Cyan
-Write-Host " Dominio: $DOMAIN_NAME  |  IP: $DC_IP" -ForegroundColor Cyan
-Write-Host "============================================================" -ForegroundColor Cyan
+Write-Host ""
+Write-Host "============================================================"
+Write-Host " FASE 1 - CONFIGURACION DEL CONTROLADOR DE DOMINIO"
+Write-Host "============================================================"
+Write-Host ""
 
 
-# ===========================================================================
-# PASO 1: Verificar si AD ya fue instalado (idempotencia)
-# Si ya existe NTDS, este script no vuelve a promover el servidor.
-# ===========================================================================
-if (Test-Path "C:\Windows\NTDS") {
-    Write-Host "[SKIP] AD DS ya esta instalado (C:\Windows\NTDS existe). Saltando Fase 1." -ForegroundColor Yellow
-    exit 0
+# =============================================================================
+# VARIABLES
+# =============================================================================
+
+$VM_IP      = if ($env:VM_IP)      { $env:VM_IP }      else { "192.168.10.20" }
+$VM_GATEWAY = if ($env:VM_GATEWAY) { $env:VM_GATEWAY } else { "192.168.10.1" }
+$SIEM_IP    = if ($env:SIEM_IP)    { $env:SIEM_IP }    else { "192.168.30.10" }
+$DOMAIN     = if ($env:DOMAIN)     { $env:DOMAIN }     else { "empresa.local" }
+
+$SUBNET_PREFIX = 24
+
+$HOSTNAME = "dc-empresa"
+$NETBIOS  = "EMPRESA"
+
+$SAFE_MODE_PASSWORD = ConvertTo-SecureString "P@ssw0rd" -AsPlainText -Force
+
+Write-Host "IP DC       : $VM_IP"
+Write-Host "Gateway     : $VM_GATEWAY"
+Write-Host "SIEM        : $SIEM_IP"
+Write-Host "Dominio     : $DOMAIN"
+Write-Host "Hostname    : $HOSTNAME"
+Write-Host ""
+
+
+# =============================================================================
+# VERIFICAR SI AD YA ESTA INSTALADO
+# =============================================================================
+
+$adFeature = Get-WindowsFeature -Name AD-Domain-Services
+
+if ($adFeature.Installed) {
+    try {
+        Import-Module ActiveDirectory -ErrorAction Stop
+        $currentDomain = Get-ADDomain -ErrorAction Stop
+
+        Write-Host ""
+        Write-Host "AD DS ya esta instalado."
+        Write-Host "Dominio detectado: $($currentDomain.DNSRoot)"
+        Write-Host "No se vuelve a realizar la promocion."
+        Write-Host ""
+        exit 0
+    }
+    catch {
+        Write-Host "AD DS aparece instalado pero el dominio no esta disponible."
+        Write-Host "Se continuara con la configuracion."
+    }
 }
 
 
-# ===========================================================================
-# PASO 2: Zona horaria y configuracion regional
-# ===========================================================================
-Write-Host "`n[PASO 2] Configurando zona horaria..." -ForegroundColor Green
+# =============================================================================
+# HOSTNAME
+# =============================================================================
+
+Write-Host ""
+Write-Host "[1/9] Verificando hostname..."
+
+$currentHostname = $env:COMPUTERNAME
+
+if ($currentHostname -ne $HOSTNAME) {
+    Write-Warning "El hostname actual ($currentHostname) no coincide con el esperado ($HOSTNAME)."
+    Write-Warning "Windows no permite renombrar y promover a DC en el mismo script sin reiniciar."
+    Write-Warning "Por favor, configura 'vm.hostname = ""$HOSTNAME""' en tu Vagrantfile."
+    throw "Requisito fallido: El hostname debe ser configurado antes de ejecutar este script."
+}
+else {
+    Write-Host "Hostname validado correctamente: $HOSTNAME"
+}
+
+
+# =============================================================================
+# ZONA HORARIA
+# =============================================================================
+
+Write-Host ""
+Write-Host "[2/9] Configurando zona horaria..."
+
+Set-TimeZone `
+    -Id "SA Pacific Standard Time" `
+    -ErrorAction Stop
+
+Write-Host "Zona horaria configurada."
+
+
+# =============================================================================
+# NTP
+# =============================================================================
+
+Write-Host ""
+Write-Host "Configurando NTP..."
+
 try {
-    Set-TimeZone -Id "SA Pacific Standard Time"   # UTC-5, Colombia
-} catch {
-    Write-Host "  [WARN] No se pudo establecer la zona horaria: $_" -ForegroundColor Yellow
+    w32tm /config /manualpeerlist:"pool.ntp.org" /syncfromflags:manual /reliable:yes /update | Out-Null
+    Restart-Service w32time -Force -ErrorAction SilentlyContinue
+    w32tm /resync /force | Out-Null
+    Write-Host "NTP configurado."
+}
+catch {
+    Write-Warning "No fue posible sincronizar NTP en este momento."
 }
 
-# Sincronizar tiempo con un servidor NTP externo (requiere internet temporal)
-w32tm /config /manualpeerlist:"pool.ntp.org" /syncfromflags:manual /reliable:YES /update | Out-Null
-try {
-    Restart-Service w32time -Force | Out-Null
-    w32tm /resync /nowait | Out-Null
-} catch {
-    Write-Host "  [WARN] No se pudo sincronizar NTP: $_" -ForegroundColor Yellow
-}
-Write-Host "  Zona horaria configurada: SA Pacific Standard Time (UTC-5)"
 
+# =============================================================================
+# IDENTIFICAR ADAPTADOR DE RED BRIDGE
+# =============================================================================
 
-# ===========================================================================
-# PASO 3: Configurar IP fija en el adaptador puente (VLAN 10)
-# El adaptador NAT de Vagrant (Ethernet 0) se deja intacto para que
-# Vagrant pueda seguir comunicándose vía WinRM.
-# El adaptador puente suele ser el segundo (InterfaceIndex mayor o nombre).
-# ===========================================================================
-Write-Host "`n[PASO 3] Configurando IP fija $DC_IP/$DC_SUBNET en adaptador puente..." -ForegroundColor Green
+Write-Host ""
+Write-Host "[3/9] Identificando adaptador de red..."
 
-# Identificar el adaptador que NO es el de NAT de Vagrant.
-# El adaptador NAT de Vagrant siempre tiene la IP 10.0.2.15
-$adapters = Get-NetAdapter | Where-Object { $_.Status -eq 'Up' }
+$adapters = Get-NetAdapter |
+    Where-Object {
+        $_.Status -eq "Up"
+    }
+
 $bridgeAdapter = $null
 
+# Primero intentamos encontrar el adaptador que NO sea NAT.
 foreach ($adapter in $adapters) {
-    $ipInfo = Get-NetIPAddress -InterfaceIndex $adapter.InterfaceIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue
-    if ($ipInfo -and $ipInfo.IPAddress -notmatch "^10\.0\.2\." -and $ipInfo.IPAddress -ne $DC_IP) {
-        $bridgeAdapter = $adapter
-        break
-    }
-    # Si no tiene IP asignada aún, también puede ser el adaptador puente
-    if (-not $ipInfo) {
-        $bridgeAdapter = $adapter
-        break
-    }
-}
+    $ips = Get-NetIPAddress `
+        -InterfaceIndex $adapter.ifIndex `
+        -AddressFamily IPv4 `
+        -ErrorAction SilentlyContinue
 
-# Fallback: buscar el adaptador con el índice de interfaz más alto (el puente)
-if (-not $bridgeAdapter) {
-    $bridgeAdapter = $adapters | Sort-Object InterfaceIndex -Descending | Select-Object -First 1
-}
-
-$ifIndex = $bridgeAdapter.InterfaceIndex
-Write-Host "  Adaptador seleccionado: '$($bridgeAdapter.Name)' (Index: $ifIndex)"
-
-# Verificar si la IP ya está configurada
-$existingIP = Get-NetIPAddress -InterfaceIndex $ifIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue |
-              Where-Object { $_.IPAddress -eq $DC_IP }
-
-if (-not $existingIP) {
-    # Eliminar IPs previas en ese adaptador para evitar conflictos
-    $oldIPs = Get-NetIPAddress -InterfaceIndex $ifIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue
-    foreach ($old in $oldIPs) {
-        if ($old.PrefixOrigin -ne 'WellKnown') {
-            Remove-NetIPAddress -InputObject $old -Confirm:$false -ErrorAction SilentlyContinue
+    foreach ($ip in $ips) {
+        if ($ip.IPAddress -notlike "10.0.2.*") {
+            $bridgeAdapter = $adapter
+            break
         }
     }
-    # Eliminar rutas del gateway anteriores en este adaptador
-    Remove-NetRoute -InterfaceIndex $ifIndex -Confirm:$false -ErrorAction SilentlyContinue
-
-    # Asignar IP fija
-    New-NetIPAddress `
-        -InterfaceIndex  $ifIndex `
-        -IPAddress       $DC_IP `
-        -PrefixLength    $DC_SUBNET `
-        -DefaultGateway  $DC_GATEWAY
-    Write-Host "  IP $DC_IP/$DC_SUBNET asignada. Gateway: $DC_GATEWAY"
-} else {
-    Write-Host "  [SKIP] IP $DC_IP ya estaba configurada."
+    if ($bridgeAdapter) {
+        break
+    }
 }
 
-# Configurar DNS (apuntarse a sí mismo)
-Set-DnsClientServerAddress -InterfaceIndex $ifIndex -ServerAddresses $DC_DNS_SELF
-Write-Host "  DNS primario configurado: $DC_DNS_SELF"
+# Si no se detectó, usar el adaptador con mayor InterfaceIndex
+if (-not $bridgeAdapter) {
+    $bridgeAdapter = $adapters |
+        Sort-Object InterfaceIndex -Descending |
+        Select-Object -First 1
+}
+
+if (-not $bridgeAdapter) {
+    throw "No se pudo identificar el adaptador de red."
+}
+
+$ifIndex = $bridgeAdapter.ifIndex
+$ifAlias = $bridgeAdapter.Name
+
+Write-Host "Adaptador seleccionado : $ifAlias"
+Write-Host "InterfaceIndex         : $ifIndex"
 
 
-# ===========================================================================
-# PASO 4: Deshabilitar IPv6 en el adaptador puente (reduce ruido en logs)
-# ===========================================================================
-Write-Host "`n[PASO 4] Deshabilitando IPv6 en adaptador puente..." -ForegroundColor Green
-Disable-NetAdapterBinding -InterfaceAlias $bridgeAdapter.Name -ComponentID "ms_tcpip6" -ErrorAction SilentlyContinue
-Write-Host "  IPv6 deshabilitado en '$($bridgeAdapter.Name)'"
+# =============================================================================
+# CONFIGURACION IP
+# =============================================================================
+
+Write-Host ""
+Write-Host "[4/9] Configurando IP estatica..."
+
+# Eliminar direcciones IPv4 anteriores excepto loopback
+Get-NetIPAddress `
+    -InterfaceIndex $ifIndex `
+    -AddressFamily IPv4 `
+    -ErrorAction SilentlyContinue |
+    Where-Object {
+        $_.IPAddress -ne "127.0.0.1"
+    } |
+    Remove-NetIPAddress `
+        -Confirm:$false `
+        -ErrorAction SilentlyContinue
+
+# Eliminar rutas por defecto anteriores del bridge
+Get-NetRoute `
+    -InterfaceIndex $ifIndex `
+    -AddressFamily IPv4 `
+    -ErrorAction SilentlyContinue |
+    Where-Object {
+        $_.DestinationPrefix -eq "0.0.0.0/0"
+    } |
+    Remove-NetRoute `
+        -Confirm:$false `
+        -ErrorAction SilentlyContinue
+
+# Asignar IP
+New-NetIPAddress `
+    -InterfaceIndex $ifIndex `
+    -IPAddress $VM_IP `
+    -PrefixLength $SUBNET_PREFIX `
+    -DefaultGateway $VM_GATEWAY `
+    -ErrorAction SilentlyContinue
+
+Write-Host "IP configurada: $VM_IP/$SUBNET_PREFIX"
+Write-Host "Gateway: $VM_GATEWAY"
 
 
-# ===========================================================================
-# PASO 5: Instalar roles de Windows (AD DS + DNS + herramientas)
-# ===========================================================================
-Write-Host "`n[PASO 5] Instalando roles: AD-Domain-Services, DNS, RSAT-ADDS..." -ForegroundColor Green
+# =============================================================================
+# DNS TEMPORAL
+# =============================================================================
+
+Write-Host ""
+Write-Host "Configurando DNS temporal..."
+
+# IMPORTANTE:
+# No usamos 127.0.0.1 antes de que exista DNS.
+# Usamos DNS publico temporal para que Windows pueda resolver nombres
+# durante la instalacion.
+Set-DnsClientServerAddress `
+    -InterfaceIndex $ifIndex `
+    -ServerAddresses @("8.8.8.8", "1.1.1.1") `
+    -ErrorAction SilentlyContinue
+
+Write-Host "DNS temporal configurado."
+
+
+# =============================================================================
+# RUTA HACIA VLAN 30
+# =============================================================================
+
+Write-Host ""
+Write-Host "Configurando ruta hacia VLAN 30..."
+
+try {
+    New-NetRoute `
+        -DestinationPrefix "192.168.30.0/24" `
+        -InterfaceIndex $ifIndex `
+        -NextHop $VM_GATEWAY `
+        -PolicyStore ActiveStore `
+        -ErrorAction SilentlyContinue
+
+    Write-Host "Ruta 192.168.30.0/24 -> $VM_GATEWAY configurada."
+}
+catch {
+    Write-Warning "No se pudo crear la ruta hacia VLAN 30."
+}
+
+
+# =============================================================================
+# DESHABILITAR IPV6
+# =============================================================================
+
+Write-Host ""
+Write-Host "Deshabilitando IPv6 en el adaptador VLAN 10..."
+
+Disable-NetAdapterBinding `
+    -Name $ifAlias `
+    -ComponentID ms_tcpip6 `
+    -ErrorAction SilentlyContinue
+
+Write-Host "IPv6 deshabilitado."
+
+
+# =============================================================================
+# PROBAR CONECTIVIDAD
+# =============================================================================
+
+Write-Host ""
+Write-Host "Probando conectividad..."
+
+try {
+    Test-Connection `
+        -ComputerName $VM_GATEWAY `
+        -Count 2 `
+        -Quiet
+
+    Write-Host "Prueba hacia gateway completada."
+}
+catch {
+    Write-Warning "No fue posible comprobar el gateway."
+}
+
+
+# =============================================================================
+# INSTALAR ROLES
+# =============================================================================
+
+Write-Host ""
+Write-Host "[5/9] Instalando roles y herramientas..."
 
 $features = @(
     "AD-Domain-Services",
@@ -156,126 +298,237 @@ $features = @(
     "RSAT-DNS-Server"
 )
 
-$installResult = Install-WindowsFeature -Name $features -IncludeManagementTools
-if ($installResult.Success) {
-    Write-Host "  Roles instalados correctamente."
-} else {
-    Write-Host "  [ERROR] Fallo al instalar roles de Windows." -ForegroundColor Red
-    throw "Fallo instalacion de roles."
+foreach ($feature in $features) {
+    Write-Host "Instalando $feature..."
+    Install-WindowsFeature `
+        -Name $feature `
+        -IncludeManagementTools `
+        -ErrorAction Stop
 }
 
+Write-Host "Roles instalados correctamente."
 
-# ===========================================================================
-# PASO 6: Promover el servidor a Controlador de Dominio
-# Crea un nuevo bosque con el dominio empresa.local
-# ===========================================================================
-Write-Host "`n[PASO 6] Promoviendo a Controlador de Dominio (bosque: $DOMAIN_NAME)..." -ForegroundColor Green
+
+# =============================================================================
+# PROMOVER A CONTROLADOR DE DOMINIO
+# =============================================================================
+
+Write-Host ""
+Write-Host "[6/9] Promoviendo servidor a Controlador de Dominio..."
 
 Import-Module ADDSDeployment
 
-$dcParams = @{
-    DomainName                    = $DOMAIN_NAME
-    DomainNetbiosName             = $NETBIOS_NAME
-    DomainMode                    = "WinThreshold"      # Windows Server 2016+
-    ForestMode                    = "WinThreshold"
-    SafeModeAdministratorPassword = $SAFEMODE_PASS
-    InstallDns                    = $true
-    CreateDnsDelegation           = $false
-    DatabasePath                  = "C:\Windows\NTDS"
-    LogPath                       = "C:\Windows\NTDS"
-    SysvolPath                    = "C:\Windows\SYSVOL"
-    NoRebootOnCompletion          = $true    # vagrant-reload maneja el reinicio
-    Force                         = $true
+try {
+    Install-ADDSForest `
+        -DomainName $DOMAIN `
+        -DomainNetbiosName $NETBIOS `
+        -DomainMode "WinThreshold" `
+        -ForestMode "WinThreshold" `
+        -InstallDns:$true `
+        -SafeModeAdministratorPassword $SAFE_MODE_PASSWORD `
+        -NoRebootOnCompletion:$true `
+        -Force:$true
+
+    Write-Host ""
+    Write-Host "Promocion a controlador de dominio completada."
 }
+catch {
+    Write-Host ""
+    Write-Host "ERROR DURANTE LA PROMOCION:"
+    Write-Host $_.Exception.Message
+    throw
+}
+
+
+# =============================================================================
+# FIREWALL
+# =============================================================================
+
+Write-Host ""
+Write-Host "[7/9] Configurando Firewall..."
+
+# DNS
+New-NetFirewallRule `
+    -DisplayName "AD-DNS-TCP" `
+    -Direction Inbound `
+    -Protocol TCP `
+    -LocalPort 53 `
+    -Action Allow `
+    -ErrorAction SilentlyContinue
+
+New-NetFirewallRule `
+    -DisplayName "AD-DNS-UDP" `
+    -Direction Inbound `
+    -Protocol UDP `
+    -LocalPort 53 `
+    -Action Allow `
+    -ErrorAction SilentlyContinue
+
+# Kerberos
+New-NetFirewallRule `
+    -DisplayName "AD-Kerberos-TCP" `
+    -Direction Inbound `
+    -Protocol TCP `
+    -LocalPort 88 `
+    -Action Allow `
+    -ErrorAction SilentlyContinue
+
+New-NetFirewallRule `
+    -DisplayName "AD-Kerberos-UDP" `
+    -Direction Inbound `
+    -Protocol UDP `
+    -LocalPort 88 `
+    -Action Allow `
+    -ErrorAction SilentlyContinue
+
+# LDAP
+New-NetFirewallRule `
+    -DisplayName "AD-LDAP-TCP" `
+    -Direction Inbound `
+    -Protocol TCP `
+    -LocalPort 389 `
+    -Action Allow `
+    -ErrorAction SilentlyContinue
+
+New-NetFirewallRule `
+    -DisplayName "AD-LDAP-UDP" `
+    -Direction Inbound `
+    -Protocol UDP `
+    -LocalPort 389 `
+    -Action Allow `
+    -ErrorAction SilentlyContinue
+
+# Global Catalog
+New-NetFirewallRule `
+    -DisplayName "AD-GC-TCP" `
+    -Direction Inbound `
+    -Protocol TCP `
+    -LocalPort 3268 `
+    -Action Allow `
+    -ErrorAction SilentlyContinue
+
+New-NetFirewallRule `
+    -DisplayName "AD-GC-SSL-TCP" `
+    -Direction Inbound `
+    -Protocol TCP `
+    -LocalPort 3269 `
+    -Action Allow `
+    -ErrorAction SilentlyContinue
+
+# SMB
+New-NetFirewallRule `
+    -DisplayName "AD-SMB-TCP" `
+    -Direction Inbound `
+    -Protocol TCP `
+    -LocalPort 445 `
+    -Action Allow `
+    -ErrorAction SilentlyContinue
+
+# RPC
+New-NetFirewallRule `
+    -DisplayName "AD-RPC-TCP" `
+    -Direction Inbound `
+    -Protocol TCP `
+    -LocalPort 135 `
+    -Action Allow `
+    -ErrorAction SilentlyContinue
+
+# Wazuh
+New-NetFirewallRule `
+    -DisplayName "Wazuh-Agent-1514" `
+    -Direction Outbound `
+    -Protocol TCP `
+    -RemotePort 1514 `
+    -Action Allow `
+    -ErrorAction SilentlyContinue
+
+New-NetFirewallRule `
+    -DisplayName "Wazuh-Agent-1515" `
+    -Direction Outbound `
+    -Protocol TCP `
+    -RemotePort 1515 `
+    -Action Allow `
+    -ErrorAction SilentlyContinue
+
+New-NetFirewallRule `
+    -DisplayName "Wazuh-Agent-1516" `
+    -Direction Outbound `
+    -Protocol TCP `
+    -RemotePort 1516 `
+    -Action Allow `
+    -ErrorAction SilentlyContinue
+
+Write-Host "Firewall configurado."
+
+
+# =============================================================================
+# AUDITORIA
+# =============================================================================
+
+Write-Host ""
+Write-Host "[8/9] Configurando auditoria de seguridad..."
+
+auditpol /set /subcategory:"Logon" /success:enable /failure:enable
+auditpol /set /subcategory:"Logoff" /success:enable /failure:enable
+auditpol /set /subcategory:"Account Lockout" /success:enable /failure:enable
+auditpol /set /subcategory:"User Account Management" /success:enable /failure:enable
+auditpol /set /subcategory:"Security Group Management" /success:enable /failure:enable
+auditpol /set /subcategory:"Process Creation" /success:enable /failure:enable
+auditpol /set /subcategory:"Process Termination" /success:enable /failure:enable
+auditpol /set /subcategory:"Directory Service Access" /success:enable /failure:enable
+auditpol /set /subcategory:"Directory Service Changes" /success:enable /failure:enable
+
+Write-Host "Auditoria configurada."
+
+
+# =============================================================================
+# EVENT LOG
+# =============================================================================
+
+Write-Host ""
+Write-Host "Configurando Security Event Log..."
+
+wevtutil sl Security /ms:104857600
+
+Write-Host "Security Event Log configurado."
+
+
+# =============================================================================
+# CONFIGURAR DNS DESPUES DE INSTALAR AD
+# =============================================================================
+
+Write-Host ""
+Write-Host "[9/9] Configurando DNS del controlador..."
 
 try {
-    Install-ADDSForest @dcParams
-    Write-Host "  Promocion a DC completada. El servidor se reiniciara ahora." -ForegroundColor Green
-} catch {
-    # Install-ADDSForest puede lanzar excepcion incluso con exito (bug conocido)
-    if ($_ -match "computer must be restarted" -or $_ -match "The system will restart") {
-        Write-Host "  Promocion completada. Reinicio pendiente (esperado)." -ForegroundColor Green
-    } else {
-        Write-Host "  [ERROR] Fallo la promocion: $_" -ForegroundColor Red
-        throw $_
-    }
+    # Ahora que DNS ya existe, podemos apuntar el DC a si mismo.
+    Set-DnsClientServerAddress `
+        -InterfaceIndex $ifIndex `
+        -ServerAddresses @("127.0.0.1") `
+        -ErrorAction SilentlyContinue
+
+    Write-Host "DNS del DC configurado hacia 127.0.0.1."
+}
+catch {
+    Write-Warning "No se pudo configurar DNS hacia localhost."
 }
 
 
-# ===========================================================================
-# PASO 7: Configurar reglas de firewall necesarias para VLAN 10
-# (Kerberos, DNS, SMB, RPC, WinRM, y puertos del agente Wazuh)
-# ===========================================================================
-Write-Host "`n[PASO 7] Configurando reglas de firewall..." -ForegroundColor Green
+# =============================================================================
+# FINAL
+# =============================================================================
 
-$firewallRules = @(
-    @{ Name="AD-Kerberos-TCP";    Protocol="TCP"; LocalPort=88;   Dir="Inbound"; Desc="Kerberos TCP" },
-    @{ Name="AD-Kerberos-UDP";    Protocol="UDP"; LocalPort=88;   Dir="Inbound"; Desc="Kerberos UDP" },
-    @{ Name="AD-DNS-TCP";         Protocol="TCP"; LocalPort=53;   Dir="Inbound"; Desc="DNS TCP" },
-    @{ Name="AD-DNS-UDP";         Protocol="UDP"; LocalPort=53;   Dir="Inbound"; Desc="DNS UDP" },
-    @{ Name="AD-LDAP";            Protocol="TCP"; LocalPort=389;  Dir="Inbound"; Desc="LDAP" },
-    @{ Name="AD-LDAPS";           Protocol="TCP"; LocalPort=636;  Dir="Inbound"; Desc="LDAP SSL" },
-    @{ Name="AD-GC";              Protocol="TCP"; LocalPort=3268; Dir="Inbound"; Desc="Global Catalog" },
-    @{ Name="AD-SMB";             Protocol="TCP"; LocalPort=445;  Dir="Inbound"; Desc="SMB" },
-    @{ Name="AD-RPC";             Protocol="TCP"; LocalPort=135;  Dir="Inbound"; Desc="RPC Endpoint Mapper" },
-    @{ Name="Wazuh-Agent-Out-1";  Protocol="TCP"; LocalPort=1514; Dir="Outbound"; Desc="Wazuh agente (logs)" },
-    @{ Name="Wazuh-Agent-Out-2";  Protocol="TCP"; LocalPort=1515; Dir="Outbound"; Desc="Wazuh agente (registro)" },
-    @{ Name="Wazuh-Agent-Out-3";  Protocol="TCP"; LocalPort=1516; Dir="Outbound"; Desc="Wazuh agente (control)" }
-)
-
-foreach ($rule in $firewallRules) {
-    $existing = Get-NetFirewallRule -DisplayName $rule.Name -ErrorAction SilentlyContinue
-    if (-not $existing) {
-        New-NetFirewallRule `
-            -DisplayName  $rule.Name `
-            -Direction    $rule.Dir `
-            -Protocol     $rule.Protocol `
-            -LocalPort    $rule.LocalPort `
-            -Action       "Allow" `
-            -Description  $rule.Desc `
-            -Enabled      True | Out-Null
-        Write-Host "  Regla creada: $($rule.Name) ($($rule.Dir) $($rule.Protocol):$($rule.LocalPort))"
-    } else {
-        Write-Host "  [SKIP] Regla ya existe: $($rule.Name)"
-    }
-}
-
-
-# ===========================================================================
-# PASO 8: Configurar politica de auditoria de seguridad
-# (Se aplica antes del reinicio; persiste después)
-# ===========================================================================
-Write-Host "`n[PASO 8] Configurando politica de auditoria de seguridad..." -ForegroundColor Green
-
-# Habilitar auditoria de inicio/cierre de sesion (exito y fallo)
-auditpol /set /subcategory:"Logon"                 /success:enable /failure:enable | Out-Null
-auditpol /set /subcategory:"Logoff"                /success:enable /failure:enable | Out-Null
-auditpol /set /subcategory:"Account Logon"         /success:enable /failure:enable | Out-Null
-auditpol /set /subcategory:"Account Management"    /success:enable /failure:enable | Out-Null
-auditpol /set /subcategory:"Directory Service Access" /success:enable /failure:enable | Out-Null
-auditpol /set /subcategory:"Policy Change"         /success:enable /failure:enable | Out-Null
-auditpol /set /subcategory:"Privilege Use"         /success:enable /failure:enable | Out-Null
-auditpol /set /subcategory:"Process Creation"      /success:enable /failure:enable | Out-Null
-
-Write-Host "  Auditoria de seguridad configurada correctamente."
-
-
-# ===========================================================================
-# PASO 9: Aumentar tamano del registro de eventos de Seguridad
-# ===========================================================================
-Write-Host "`n[PASO 9] Ajustando tamano maximo del log de Seguridad..." -ForegroundColor Green
-wevtutil sl Security /ms:102400000   # 100 MB
-Write-Host "  Security Event Log: 100 MB"
-
-
-# ===========================================================================
-# FINALIZAR FASE 1 - El plugin vagrant-reload reiniciara la VM
-# ===========================================================================
-Write-Host "`n============================================================" -ForegroundColor Cyan
-Write-Host " FASE 1 COMPLETADA" -ForegroundColor Cyan
-Write-Host " El sistema se reiniciara para completar la promocion del DC." -ForegroundColor Cyan
-Write-Host " Vagrant ejecutara automaticamente la Fase 2 despues del reinicio." -ForegroundColor Cyan
-Write-Host "============================================================" -ForegroundColor Cyan
-
-# Iniciar reinicio (vagrant-reload esperara que la VM vuelva a estar accesible)
-Restart-Computer -Force
+Write-Host ""
+Write-Host "============================================================"
+Write-Host " FASE 1 COMPLETADA"
+Write-Host "============================================================"
+Write-Host ""
+Write-Host "Hostname : $HOSTNAME"
+Write-Host "IP       : $VM_IP"
+Write-Host "Dominio  : $DOMAIN"
+Write-Host "NetBIOS  : $NETBIOS"
+Write-Host ""
+Write-Host "IMPORTANTE:"
+Write-Host "El sistema sera reiniciado por vagrant-reload."
+Write-Host "No se ejecuta Restart-Computer desde este script."
+Write-Host ""
