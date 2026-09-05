@@ -1,0 +1,123 @@
+# -*- mode: ruby -*-
+# vi: set ft=ruby :
+
+# =============================================================================
+# Vagrantfile - Integrante B (Lenovo Legion 5)
+# Proyecto de Grado - Laboratorio de Ciberseguridad VLAN 10 (Servidores)
+#
+# Levanta dos VMs:
+#   - web-server             : Servidor Web Ubuntu 22.04         → 192.168.10.10
+#   - windows-dc             : Controlador de Dominio Win2019    → 192.168.10.20
+#
+# REQUISITO: Ajusta BRIDGE_INTERFACE con el nombre exacto de tu NIC física
+#            (la que conecta el portátil al Switch 1).  Ejecuta `ipconfig`
+#            (Windows) o `ip link` (Linux) para encontrarlo.
+#
+# NOTA: Las estaciones de trabajo (VLAN 20) deben levantarse desde otro portátil
+#       (Integrante C). El servidor SIEM (VLAN 30) debe levantarse desde otro portátil
+#       (Integrante A).
+#
+# CONFIGURACIÓN ACTUAL (Desarrollo):
+#   - Usando Wi-Fi para descargar paquetes (bootstrap)
+#   - En laboratorio: Cambiar a "Ethernet" cuando esté conectado al Switch 1
+# =============================================================================
+
+BRIDGE_INTERFACE = "Wi-Fi"   # DESARROLLO: Wi-Fi (con internet para descargas)
+                             # LABORATORIO: Cambiar a "Ethernet" (alámbrica conectada al Switch 1)
+SIEM_IP          = "192.168.30.10"   # SIEM Wazuh en VLAN 30 (Integrante A)
+DC_IP            = "192.168.10.20"
+DOMAIN           = "empresa.local"
+GATEWAY          = "192.168.10.1"    # Gateway VLAN 10
+
+Vagrant.configure("2") do |config|
+
+  # Deshabilitar carpeta sincronizada por defecto
+  config.vm.synced_folder ".", "/vagrant", disabled: true
+
+  # ---------------------------------------------------------------------------
+  # 1. Servidor Web (Ubuntu 22.04) - VLAN 10 (Servidores)
+  # ---------------------------------------------------------------------------
+  config.vm.define "web-server" do |web|
+    web.vm.box      = "ubuntu/jammy64"
+    web.vm.hostname = "web-server"
+
+    # Red puente conectada al Switch 1 (VLAN 10)
+    web.vm.network "public_network",
+      bridge: BRIDGE_INTERFACE.empty? ? nil : BRIDGE_INTERFACE,
+      auto_config: false   # IP fija configurada por el script
+
+    web.vm.provider "virtualbox" do |vb|
+      vb.name   = "SIEM-WebServer-VLAN10"
+      vb.cpus   = 1
+      vb.memory = 1024
+      vb.customize ["modifyvm", :id, "--vram", "16"]
+    end
+
+    web.vm.provision "shell",
+      path: "scripts/web-server.sh",
+      env: {
+        "VM_IP"    => "192.168.10.10",
+        "VM_GATEWAY" => GATEWAY,
+        "VM_DNS"   => DC_IP,
+        "SIEM_IP"  => SIEM_IP,
+        "DOMAIN"   => DOMAIN
+      }
+  end
+
+  # ---------------------------------------------------------------------------
+  # 2. Controlador de Dominio Windows Server 2019 - VLAN 10 (Servidores)
+  # ---------------------------------------------------------------------------
+  config.vm.define "windows-dc" do |dc|
+    dc.vm.box               = "jborean93/WindowsServer2019"
+    dc.vm.hostname          = "WIN-DC01"
+    dc.vm.communicator      = "winrm"
+    dc.winrm.username       = "vagrant"
+    dc.winrm.password       = "vagrant"
+    dc.vm.boot_timeout      = 1800     # 30 minutos
+    dc.winrm.timeout        = 1800     # 30 minutos
+    dc.winrm.retry_limit    = 100      # Más reintentos
+    dc.winrm.max_wait_time  = 1800     # 30 minutos máximo de espera
+
+    # Red puente conectada al Switch 1 (VLAN 10)
+    dc.vm.network "public_network",
+      bridge: BRIDGE_INTERFACE.empty? ? nil : BRIDGE_INTERFACE,
+      auto_config: false   # IP fija configurada por el script
+
+    dc.vm.provider "virtualbox" do |vb|
+      vb.name   = "SIEM-WindowsDC-VLAN10"
+      vb.cpus   = 2
+      vb.memory = 2048
+      vb.gui    = false
+      vb.customize ["modifyvm", :id, "--vram", "32"]
+      vb.customize ["modifyvm", :id, "--clipboard", "disabled"]
+      vb.customize ["modifyvm", :id, "--draganddrop", "disabled"]
+    end
+
+    # Necesita vagrant-reload plugin para reinicios
+    unless Vagrant.has_plugin?("vagrant-reload")
+      raise "ERROR: Instala el plugin con: vagrant plugin install vagrant-reload"
+    end
+
+    dc.vm.provision "shell",
+      path:        "scripts/windows-dc.ps1",
+      powershell_elevated_interactive: false,
+      env: {
+        "VM_IP"   => "192.168.10.20",
+        "VM_GATEWAY" => GATEWAY,
+        "SIEM_IP" => SIEM_IP,
+        "DOMAIN"  => DOMAIN
+      }
+
+    # Reinicio para completar promoción a DC
+    dc.vm.provision :reload
+
+    dc.vm.provision "shell",
+      path:        "scripts/windows-dc-second.ps1",
+      powershell_elevated_interactive: false,
+      env: {
+        "SIEM_IP" => SIEM_IP,
+        "DOMAIN"  => DOMAIN
+      }
+  end
+
+end

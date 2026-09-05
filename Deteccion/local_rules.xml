@@ -1,0 +1,109 @@
+<!--
+  local_rules.xml — Reglas de correlacion personalizadas para el proyecto SIEM
+  Mapeadas a MITRE ATT&CK segun los 5 ataques definidos en la metodologia:
+    T1110 Fuerza bruta SSH | T1046 Escaneo de puertos | T1550.002 Pass-the-Hash
+    T1190 Inyeccion SQL    | T1203/T1059 Ejecucion de payload malicioso
+  Colocar en: /var/ossec/etc/rules/local_rules.xml del Wazuh Manager
+  Reiniciar despues: systemctl restart wazuh-manager
+-->
+<group name="local,proyecto_siem,">
+
+  <!-- ============ 1. FUERZA BRUTA SSH (T1110.001) ============ -->
+  <rule id="100010" level="10" frequency="5" timeframe="120">
+    <if_matched_sid>5716</if_matched_sid>
+    <same_source_ip />
+    <description>Fuerza bruta SSH detectada: 5 intentos fallidos en 120s desde la misma IP (T1110.001)</description>
+    <mitre>
+      <id>T1110.001</id>
+    </mitre>
+    <group>attack,bruteforce,ssh,</group>
+  </rule>
+
+  <rule id="100011" level="12" frequency="3" timeframe="60">
+    <if_matched_sid>100010</if_matched_sid>
+    <description>Fuerza bruta SSH critica: patron sostenido de intentos fallidos (T1110.001)</description>
+    <mitre><id>T1110.001</id></mitre>
+    <group>attack,bruteforce,ssh,</group>
+  </rule>
+
+  <!-- ============ 2. ESCANEO DE PUERTOS (T1046) ============ -->
+  <!-- Requiere decoder/regla de Suricata reenviada via agente (ver local_decoder.xml) -->
+  <rule id="100020" level="8">
+    <if_sid>86601</if_sid>
+    <field name="alert.signature">(?i)nmap|portscan|port scan|Scan</field>
+    <description>Escaneo de puertos detectado por Suricata (T1046)</description>
+    <mitre><id>T1046</id></mitre>
+    <group>attack,recon,scan,</group>
+  </rule>
+
+  <rule id="100021" level="10" frequency="10" timeframe="60">
+    <if_matched_sid>100020</if_matched_sid>
+    <same_source_ip />
+    <description>Escaneo de puertos intensivo: multiples alertas de escaneo en 60s (T1046)</description>
+    <mitre><id>T1046</id></mitre>
+    <group>attack,recon,scan,</group>
+  </rule>
+
+  <!-- ============ 3. PASS-THE-HASH / MOVIMIENTO LATERAL (T1550.002 / T1021) ============ -->
+  <rule id="100030" level="12">
+    <if_group>windows</if_group>
+    <field name="win.system.eventID">4624</field>
+    <field name="win.eventdata.logonType">3</field>
+    <field name="win.eventdata.authenticationPackageName">NTLM</field>
+    <description>Posible autenticacion Pass-the-Hash: logon tipo 3 con NTLM (T1550.002)</description>
+    <mitre><id>T1550.002</id></mitre>
+    <group>attack,lateral_movement,pth,</group>
+  </rule>
+
+  <rule id="100031" level="13">
+    <if_group>sysmon_event1</if_group>
+    <field name="win.eventdata.image" type="pcre2">(?i)psexec|wmiexec|smbexec|atexec</field>
+    <description>Herramienta de movimiento lateral detectada via Sysmon (PsExec/Impacket) (T1021/T1550.002)</description>
+    <mitre><id>T1021.002</id></mitre>
+    <group>attack,lateral_movement,pth,</group>
+  </rule>
+
+  <!-- ============ 4. INYECCION SQL (T1190) ============ -->
+  <rule id="100040" level="10">
+    <if_sid>31108,31106</if_sid>
+    <regex type="pcre2">(?i)(union(.*)select|select(.*)from|sleep\(|benchmark\(|or 1=1|' or '1'='1)</regex>
+    <description>Intento de inyeccion SQL detectado en logs del servidor web (T1190)</description>
+    <mitre><id>T1190</id></mitre>
+    <group>attack,web,sqli,</group>
+  </rule>
+
+  <rule id="100041" level="8">
+    <if_sid>86601</if_sid>
+    <field name="alert.signature" type="pcre2">(?i)sql injection|sqlmap</field>
+    <description>Firma Suricata: intento de inyeccion SQL / uso de sqlmap (T1190)</description>
+    <mitre><id>T1190</id></mitre>
+    <group>attack,web,sqli,</group>
+  </rule>
+
+  <!-- ============ 5. EJECUCION DE PAYLOAD MALICIOSO (T1203 / T1059 / T1204) ============ -->
+  <rule id="100050" level="13">
+    <if_group>sysmon_event1</if_group>
+    <field name="win.eventdata.parentImage" type="pcre2">(?i)winword|excel|powerpnt|outlook</field>
+    <field name="win.eventdata.image" type="pcre2">(?i)powershell|cmd\.exe|mshta|wscript|cscript</field>
+    <description>Posible ejecucion de payload: proceso hijo sospechoso de aplicacion ofimatica (T1204/T1059)</description>
+    <mitre><id>T1204.002</id></mitre>
+    <group>attack,execution,payload,</group>
+  </rule>
+
+  <rule id="100051" level="12">
+    <if_group>sysmon_event1</if_group>
+    <field name="win.eventdata.commandLine" type="pcre2">(?i)-enc |-encodedcommand|downloadstring|invoke-expression|iex\(</field>
+    <description>Comando PowerShell ofuscado/descarga remota tipico de payload malicioso (T1059.001)</description>
+    <mitre><id>T1059.001</id></mitre>
+    <group>attack,execution,payload,</group>
+  </rule>
+
+  <!-- ============ CORRELACION ESCENARIO 3 (mixto) ============ -->
+  <rule id="100099" level="14" frequency="2" timeframe="600">
+    <if_matched_group>attack</if_matched_group>
+    <different_srcip />
+    <description>Multiples familias de ataque detectadas en ventana de 10 min (correlacion escenario mixto)</description>
+    <group>correlation,escenario3,</group>
+  </rule>
+
+</group>

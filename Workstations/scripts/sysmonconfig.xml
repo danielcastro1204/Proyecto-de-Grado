@@ -1,0 +1,180 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    sysmonconfig.xml — Configuración de Sysmon para laboratorio SIEM
+    Basada en la plantilla de SwiftOnSecurity (https://github.com/SwiftOnSecurity/sysmon-config)
+    Adaptada para el proyecto de grado — Integrante C — VLAN 20
+
+    Eventos capturados:
+      - ID 1:  Creación de procesos
+      - ID 2:  Cambio de timestamp de archivos
+      - ID 3:  Conexiones de red
+      - ID 5:  Terminación de procesos
+      - ID 7:  Carga de imágenes (DLL)
+      - ID 8:  CreateRemoteThread (inyección de código)
+      - ID 10: ProcessAccess (acceso entre procesos)
+      - ID 11: FileCreate
+      - ID 12: RegistryEvent (create/delete)
+      - ID 13: RegistryEvent (set value)
+      - ID 15: FileCreateStreamHash (alternate data streams)
+      - ID 17: PipeEvent (create)
+      - ID 18: PipeEvent (connect)
+      - ID 22: DNSEvent
+-->
+<Sysmon schemaversion="4.82">
+
+  <!-- Capturar hash con múltiples algoritmos para correlación SIEM -->
+  <HashAlgorithms>md5,sha256,imphash</HashAlgorithms>
+
+  <!-- Verificar firmas digitales en imágenes cargadas -->
+  <CheckRevocation>false</CheckRevocation>
+
+  <EventFiltering>
+
+    <!-- ================================================================
+         EVENTO 1: Creación de procesos
+         Capturar casi todo; excluir ruido conocido
+    ================================================================ -->
+    <ProcessCreate onmatch="exclude">
+      <!-- Excluir procesos de sistema ruidosos pero benignos -->
+      <Image condition="is">C:\Windows\System32\wbem\WMIC.exe</Image>
+      <Image condition="is">C:\Windows\System32\conhost.exe</Image>
+      <CommandLine condition="contains">chrome.exe --type=renderer</CommandLine>
+      <CommandLine condition="contains">MsMpEng.exe</CommandLine>
+    </ProcessCreate>
+
+    <!-- ================================================================
+         EVENTO 2: Cambio de timestamp de archivo
+         Indicador de timestomping (técnica anti-forense)
+    ================================================================ -->
+    <FileCreateTime onmatch="include">
+      <!-- Incluir archivos en rutas sensibles -->
+      <TargetFilename condition="contains">C:\Users</TargetFilename>
+      <TargetFilename condition="contains">C:\Windows\Temp</TargetFilename>
+      <TargetFilename condition="contains">C:\ProgramData</TargetFilename>
+    </FileCreateTime>
+
+    <!-- ================================================================
+         EVENTO 3: Conexiones de red
+         Monitorear conexiones salientes sospechosas
+    ================================================================ -->
+    <NetworkConnect onmatch="exclude">
+      <!-- Excluir tráfico legítimo de alto volumen para reducir ruido -->
+      <Image condition="is">C:\Program Files\Google\Chrome\Application\chrome.exe</Image>
+      <Image condition="is">C:\Windows\System32\svchost.exe</Image>
+      <DestinationPort condition="is">443</DestinationPort>
+      <DestinationPort condition="is">80</DestinationPort>
+    </NetworkConnect>
+
+    <!-- ================================================================
+         EVENTO 5: Terminación de procesos
+    ================================================================ -->
+    <ProcessTerminate onmatch="include">
+      <!-- Capturar terminación de procesos de seguridad -->
+      <Image condition="contains">sysmon</Image>
+      <Image condition="contains">MsMpEng</Image>
+      <Image condition="contains">wazuh</Image>
+    </ProcessTerminate>
+
+    <!-- ================================================================
+         EVENTO 7: Carga de imágenes (DLL injection detection)
+    ================================================================ -->
+    <ImageLoad onmatch="include">
+      <!-- DLLs conocidas de técnicas de inyección -->
+      <ImageLoaded condition="contains">reflective</ImageLoaded>
+      <ImageLoaded condition="end with">scrobj.dll</ImageLoaded>
+      <!-- Detectar DLLs no firmadas en ubicaciones del sistema -->
+      <Signed condition="is">false</Signed>
+    </ImageLoad>
+
+    <!-- ================================================================
+         EVENTO 8: CreateRemoteThread (inyección de código entre procesos)
+    ================================================================ -->
+    <CreateRemoteThread onmatch="include">
+      <!-- Capturar inyecciones en procesos críticos -->
+      <TargetImage condition="is">C:\Windows\System32\lsass.exe</TargetImage>
+      <TargetImage condition="is">C:\Windows\System32\svchost.exe</TargetImage>
+      <TargetImage condition="contains">explorer.exe</TargetImage>
+      <TargetImage condition="contains">winlogon.exe</TargetImage>
+    </CreateRemoteThread>
+
+    <!-- ================================================================
+         EVENTO 10: ProcessAccess (credential dumping via LSASS)
+    ================================================================ -->
+    <ProcessAccess onmatch="include">
+      <!-- Detectar acceso a LSASS (ej: Mimikatz) -->
+      <TargetImage condition="is">C:\Windows\System32\lsass.exe</TargetImage>
+      <!-- Detectar acceso con permisos de lectura de memoria -->
+      <GrantedAccess condition="is">0x1010</GrantedAccess>
+      <GrantedAccess condition="is">0x1410</GrantedAccess>
+      <GrantedAccess condition="is">0x40</GrantedAccess>
+    </ProcessAccess>
+
+    <!-- ================================================================
+         EVENTO 11: Creación de archivos
+    ================================================================ -->
+    <FileCreate onmatch="include">
+      <!-- Detectar archivos creados en ubicaciones de inicio automático -->
+      <TargetFilename condition="contains">\Startup\</TargetFilename>
+      <TargetFilename condition="contains">\Start Menu\Programs\Startup</TargetFilename>
+      <TargetFilename condition="contains">C:\ProgramData\Microsoft\Windows\Start Menu</TargetFilename>
+      <!-- Archivos ejecutables en directorios de usuario -->
+      <TargetFilename condition="end with">.exe</TargetFilename>
+      <TargetFilename condition="end with">.dll</TargetFilename>
+      <TargetFilename condition="end with">.ps1</TargetFilename>
+      <TargetFilename condition="end with">.bat</TargetFilename>
+      <TargetFilename condition="end with">.vbs</TargetFilename>
+      <TargetFilename condition="end with">.hta</TargetFilename>
+    </FileCreate>
+
+    <!-- ================================================================
+         EVENTOS 12, 13, 14: Cambios en Registro de Windows
+    ================================================================ -->
+    <RegistryEvent onmatch="include">
+      <!-- Claves de persistencia comunes -->
+      <TargetObject condition="contains">Software\Microsoft\Windows\CurrentVersion\Run</TargetObject>
+      <TargetObject condition="contains">Software\Microsoft\Windows\CurrentVersion\RunOnce</TargetObject>
+      <TargetObject condition="contains">SYSTEM\CurrentControlSet\Services</TargetObject>
+      <!-- Claves de políticas de seguridad -->
+      <TargetObject condition="contains">SOFTWARE\Policies\Microsoft</TargetObject>
+      <!-- AppInit DLLs -->
+      <TargetObject condition="contains">AppInit_DLLs</TargetObject>
+      <!-- Image File Execution Options (debugger hijacking) -->
+      <TargetObject condition="contains">Image File Execution Options</TargetObject>
+    </RegistryEvent>
+
+    <!-- ================================================================
+         EVENTO 15: FileCreateStreamHash (Alternate Data Streams)
+    ================================================================ -->
+    <FileCreateStreamHash onmatch="include">
+      <TargetFilename condition="end with">.exe</TargetFilename>
+      <TargetFilename condition="end with">.dll</TargetFilename>
+      <TargetFilename condition="end with">.ps1</TargetFilename>
+    </FileCreateStreamHash>
+
+    <!-- ================================================================
+         EVENTOS 17, 18: Named Pipes (movimiento lateral)
+    ================================================================ -->
+    <PipeEvent onmatch="include">
+      <!-- Pipes conocidos de herramientas de post-explotación -->
+      <PipeName condition="contains">msagent_</PipeName>
+      <PipeName condition="contains">mojo.</PipeName>
+      <PipeName condition="contains">postex_</PipeName>
+      <PipeName condition="contains">status_</PipeName>
+      <PipeName condition="contains">meterpreter</PipeName>
+      <PipeName condition="contains">PSEXESVC</PipeName>
+      <PipeName condition="contains">paexec</PipeName>
+      <PipeName condition="contains">remcom</PipeName>
+    </PipeEvent>
+
+    <!-- ================================================================
+         EVENTO 22: Consultas DNS
+    ================================================================ -->
+    <DnsQuery onmatch="exclude">
+      <!-- Excluir consultas DNS ruidosas pero legítimas -->
+      <QueryName condition="end with">.microsoft.com</QueryName>
+      <QueryName condition="end with">.windows.com</QueryName>
+      <QueryName condition="end with">.windowsupdate.com</QueryName>
+    </DnsQuery>
+
+  </EventFiltering>
+</Sysmon>

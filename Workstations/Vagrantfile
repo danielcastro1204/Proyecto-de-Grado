@@ -1,0 +1,228 @@
+# =============================================================================
+# Vagrantfile — Integrante C | Proyecto SIEM | Estaciones de Trabajo VLAN 20
+# =============================================================================
+# Requisitos previos:
+#   vagrant plugin install vagrant-reload
+#
+# Antes de ejecutar:
+#   1. El Controlador de Dominio (192.168.10.20) del Integrante B debe estar UP.
+#   2. El servidor SIEM/Wazuh (192.168.30.10) del Integrante A debe estar UP.
+#   3. Ajusta BRIDGE_IFACE con el nombre exacto de tu adaptador físico
+#      (el que conecta el portátil al Switch 1).
+#
+# Uso:
+#   vagrant up                  # levanta todas las VMs
+#   vagrant up win10-01         # levanta solo una VM
+#   vagrant reload --provision  # tras reinicio manual por unión a dominio
+# =============================================================================
+
+# ------------------------------------------------------------
+# CONFIGURACIÓN GLOBAL — Edita estas variables según tu entorno
+# ------------------------------------------------------------
+
+# Nombre del adaptador de red físico del anfitrión conectado al Switch 1.
+# En Windows: "Ethernet" o "Intel(R) Ethernet Connection ..."
+# En Linux/macOS: "eth0", "enp3s0", "en0", etc.
+# Deja vacío ("") para que Vagrant pregunte interactivamente.
+BRIDGE_IFACE = ""
+
+# Credenciales del Administrador del Dominio (empresa.local)
+DOMAIN_ADMIN_PASS = "P@ssw0rd"
+
+# IP del Manager Wazuh (SIEM — Integrante A)
+WAZUH_MANAGER_IP = "192.168.30.10"
+
+# IP del Controlador de Dominio (Integrante B)
+DC_IP = "192.168.10.20"
+
+# Gateway VLAN 20
+GW_IP = "192.168.20.1"
+
+# ------------------------------------------------------------
+Vagrant.configure("2") do |config|
+
+  # Plugin de recarga (necesario para reinicio post-dominio en Windows)
+  unless Vagrant.has_plugin?("vagrant-reload")
+    raise "ERROR: Falta el plugin 'vagrant-reload'. Instálalo con:\n" \
+          "  vagrant plugin install vagrant-reload"
+  end
+
+  # ================================================================
+  # Configuración común para todas las VMs
+  # ================================================================
+  config.vm.provider "virtualbox" do |vb|
+    vb.gui = true          # GUI visible (estaciones de trabajo de usuario)
+    vb.linked_clone = true # Clones enlazados para ahorrar espacio en disco
+  end
+
+  # Deshabilitar carpeta sincronizada por defecto (no necesaria)
+  config.vm.synced_folder ".", "/vagrant", disabled: true
+
+  # Copiar scripts al guest
+  config.vm.provision "file", source: "scripts/", destination: "/tmp/scripts/"
+
+  # ================================================================
+  # MÁQUINA 1 — win10-01 | IP: 192.168.20.30
+  # ================================================================
+  config.vm.define "win10-01" do |wins1|
+    wins1.vm.box = "gusztavvargadr/windows-10"
+    wins1.vm.box_check_update = false
+    wins1.vm.hostname = "win10-01"
+    wins1.vm.communicator = "winrm"
+
+    wins1.vm.network "public_network",
+      bridge: BRIDGE_IFACE.empty? ? nil : BRIDGE_IFACE,
+      auto_config: false   # La IP se configura desde el script PowerShell
+
+    wins1.vm.provider "virtualbox" do |vb|
+      vb.name   = "SIEM_win10-01"
+      vb.memory = 2048
+      vb.cpus   = 2
+      vb.customize ["modifyvm", :id, "--vram", "64"]
+      vb.customize ["modifyvm", :id, "--audio", "none"]
+    end
+
+    # ---- FASE 1: Red + Hostname + Unión al dominio ----
+    wins1.vm.provision "shell",
+      path:       "scripts/windows-ws.ps1",
+      privileged: true,
+      env: {
+        "VM_IP"              => "192.168.20.30",
+        "VM_HOSTNAME"        => "win10-01",
+        "VM_GW"              => GW_IP,
+        "VM_DNS"             => DC_IP,
+        "DOMAIN_ADMIN_PASS"  => DOMAIN_ADMIN_PASS,
+        "WAZUH_MANAGER_IP"   => WAZUH_MANAGER_IP
+      }
+
+    # Reinicio obligatorio tras unirse al dominio
+    wins1.vm.provision :reload
+
+    # ---- FASE 2: Sysmon + Wazuh Agent (post-reinicio) ----
+    wins1.vm.provision "shell",
+      path:       "scripts/windows-ws-second.ps1",
+      privileged: true,
+      env: {
+        "VM_HOSTNAME"       => "win10-01",
+        "WAZUH_MANAGER_IP"  => WAZUH_MANAGER_IP
+      }
+  end
+
+  # ================================================================
+  # MÁQUINA 2 — win10-02 | IP: 192.168.20.31
+  # ================================================================
+  config.vm.define "win10-02" do |wins2|
+    wins2.vm.box = "gusztavvargadr/windows-10"
+    wins2.vm.box_check_update = false
+    wins2.vm.hostname = "win10-02"
+    wins2.vm.communicator = "winrm"
+
+    wins2.vm.network "public_network",
+      bridge: BRIDGE_IFACE.empty? ? nil : BRIDGE_IFACE,
+      auto_config: false
+
+    wins2.vm.provider "virtualbox" do |vb|
+      vb.name   = "SIEM_win10-02"
+      vb.memory = 2048
+      vb.cpus   = 2
+      vb.customize ["modifyvm", :id, "--vram", "64"]
+      vb.customize ["modifyvm", :id, "--audio", "none"]
+    end
+
+    wins2.vm.provision "shell",
+      path:       "scripts/windows-ws.ps1",
+      privileged: true,
+      env: {
+        "VM_IP"              => "192.168.20.31",
+        "VM_HOSTNAME"        => "win10-02",
+        "VM_GW"              => GW_IP,
+        "VM_DNS"             => DC_IP,
+        "DOMAIN_ADMIN_PASS"  => DOMAIN_ADMIN_PASS,
+        "WAZUH_MANAGER_IP"   => WAZUH_MANAGER_IP
+      }
+
+    wins2.vm.provision :reload
+
+    wins2.vm.provision "shell",
+      path:       "scripts/windows-ws-second.ps1",
+      privileged: true,
+      env: {
+        "VM_HOSTNAME"       => "win10-02",
+        "WAZUH_MANAGER_IP"  => WAZUH_MANAGER_IP
+      }
+  end
+
+  # ================================================================
+  # MÁQUINA 3 — linux-01 | IP: 192.168.20.40
+  # ================================================================
+  config.vm.define "linux-01" do |lx1|
+    # Box con escritorio preinstalado para evitar instalación larga.
+    # Alternativa sin escritorio: "ubuntu/jammy64" (el script lo instala).
+    lx1.vm.box = "lxdware/ubuntu-desktop-22-04"
+    lx1.vm.box_check_update = false
+    lx1.vm.hostname = "linux-01"
+    lx1.vm.communicator = "ssh"
+
+    lx1.vm.network "public_network",
+      bridge: BRIDGE_IFACE.empty? ? nil : BRIDGE_IFACE,
+      auto_config: false
+
+    lx1.vm.provider "virtualbox" do |vb|
+      vb.name   = "SIEM_linux-01"
+      vb.memory = 2048
+      vb.cpus   = 2
+      vb.customize ["modifyvm", :id, "--vram", "128"]
+      vb.customize ["modifyvm", :id, "--audio", "none"]
+      # Habilitar aceleración 3D para mejor rendimiento del escritorio
+      vb.customize ["modifyvm", :id, "--accelerate3d", "on"]
+    end
+
+    lx1.vm.provision "shell",
+      path:       "scripts/linux-desktop.sh",
+      privileged: true,
+      env: {
+        "VM_IP"            => "192.168.20.40",
+        "VM_HOSTNAME"      => "linux-01",
+        "VM_GW"            => GW_IP,
+        "VM_DNS"           => DC_IP,
+        "WAZUH_MANAGER_IP" => WAZUH_MANAGER_IP,
+        "INSTALL_DESKTOP"  => "false"   # Cambiar a "true" si usas ubuntu/jammy64
+      }
+  end
+
+  # ================================================================
+  # MÁQUINA 4 — linux-02 | IP: 192.168.20.41
+  # ================================================================
+  config.vm.define "linux-02" do |lx2|
+    lx2.vm.box = "lxdware/ubuntu-desktop-22-04"
+    lx2.vm.box_check_update = false
+    lx2.vm.hostname = "linux-02"
+    lx2.vm.communicator = "ssh"
+
+    lx2.vm.network "public_network",
+      bridge: BRIDGE_IFACE.empty? ? nil : BRIDGE_IFACE,
+      auto_config: false
+
+    lx2.vm.provider "virtualbox" do |vb|
+      vb.name   = "SIEM_linux-02"
+      vb.memory = 2048
+      vb.cpus   = 2
+      vb.customize ["modifyvm", :id, "--vram", "128"]
+      vb.customize ["modifyvm", :id, "--audio", "none"]
+      vb.customize ["modifyvm", :id, "--accelerate3d", "on"]
+    end
+
+    lx2.vm.provision "shell",
+      path:       "scripts/linux-desktop.sh",
+      privileged: true,
+      env: {
+        "VM_IP"            => "192.168.20.41",
+        "VM_HOSTNAME"      => "linux-02",
+        "VM_GW"            => GW_IP,
+        "VM_DNS"           => DC_IP,
+        "WAZUH_MANAGER_IP" => WAZUH_MANAGER_IP,
+        "INSTALL_DESKTOP"  => "false"
+      }
+  end
+
+end
