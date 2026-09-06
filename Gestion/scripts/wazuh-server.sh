@@ -28,7 +28,7 @@ DNS="${GATEWAY}"
 IFACE="enp0s8"          # Segunda NIC de VirtualBox (la puente); la primera (enp0s3) es NAT de Vagrant
 
 # ── Versión de Wazuh ─────────────────────────────────────────────────────────
-WAZUH_VERSION="4.x"
+WAZUH_VERSION="4.14"
 WAZUH_PASSWORDS_FILE="/root/wazuh_passwords.txt"
 
 # =============================================================================
@@ -53,9 +53,14 @@ network:
       dhcp4: false
       addresses:
         - ${STATIC_IP}/${PREFIX}
-      routes:
-        - to: 0.0.0.0/0
-          via: ${GATEWAY}
+      # Sin ruta por defecto aquí: dejamos que el tráfico a internet siga
+      # saliendo por la NAT de Vagrant (enp0s3). Esta interfaz solo necesita
+      # la IP fija para hablar dentro de la VLAN 30.
+      # Si algún día conectas la topología física real con gateway en
+      # ${GATEWAY} y quieres que el tráfico salga por ahí, puedes reactivar:
+      # routes:
+      #   - to: 0.0.0.0/0
+      #     via: ${GATEWAY}
       nameservers:
         addresses:
           - ${DNS}
@@ -98,6 +103,19 @@ install_wazuh() {
     warning "Wazuh Dashboard ya existe. Omitiendo instalación."
     return 0
   fi
+
+  # Evitar que systemd mate a wazuh-manager por timeout durante el primer
+  # arranque (con poca CPU/RAM disponible, el arranque completo de todos
+  # los daemons puede tardar más que el TimeoutStartSec por defecto).
+  # Se crea el drop-in ANTES de instalar el paquete: systemd lo mezcla con
+  # la unidad en cuanto esta se registre, sin necesitar pasos extra.
+  info "Configurando timeout extendido para el arranque de wazuh-manager..."
+  mkdir -p /etc/systemd/system/wazuh-manager.service.d
+  cat > /etc/systemd/system/wazuh-manager.service.d/override.conf <<'OVERRIDEEOF'
+[Service]
+TimeoutStartSec=300
+OVERRIDEEOF
+  systemctl daemon-reload
 
   info "=========================================="
   info "  Iniciando instalación Wazuh all-in-one  "
@@ -269,7 +287,7 @@ show_summary() {
   echo -e "  ${YELLOW}Puertos abiertos:${NC} 22, 443, 514/udp, 1514-1516, 55000"
   echo -e "  ${YELLOW}Logs router     :${NC} UDP 514 (0.0.0.0/0 permitido)"
   echo ""
-  echo -e "${GREEN}══════════════════════════════════════════════════════════════${NC}"
+  echo -e "${GREEN}${NC}"
 }
 
 # =============================================================================
