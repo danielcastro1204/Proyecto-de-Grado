@@ -37,6 +37,14 @@ WEB_DNS_RETRY_DELAY=2           # Segundos entre reintentos
 WAZUH_MANAGER="$SIEM_IP"       # SIEM en VLAN 30 (192.168.30.10) - Integrante A
 WAZUH_VERSION="4.9.2"
 
+# ---- Dual-stack: direccionamiento IPv6 (VLAN10 - fd00:10::/64) ----
+# Estas variables son ADITIVAS: si no se inyectan desde el Vagrantfile,
+# se usan los valores de la topologia y el IPv4 sigue funcionando igual.
+WEB_IP6="${VM_IP6:-fd00:10::10}"
+WEB_MASK6="64"
+WEB_GATEWAY6="${VM_GATEWAY6:-fd00:10::1}"
+WEB_DNS6="${VM_DNS6:-fd00:10::20}"   # DC via IPv6
+
 # Colores para output
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -134,19 +142,21 @@ log "Paquetes base instalados."
 # Vagrant usa enp0s3 para NAT y enp0s8 para redes adicionales.
 # Identificamos el adaptador puente (el que no es el de NAT 10.0.2.x).
 # ===========================================================================
-info "PASO 3: Configurando IP fija ${WEB_IP}/${WEB_MASK}..."
+info "PASO 3: Configurando IP fija ${WEB_IP}/${WEB_MASK} (dual-stack IPv4/IPv6)..."
 
-# Verificar si la IP ya esta configurada
-CURRENT_IP=$(ip addr show "$BRIDGE_IFACE" 2>/dev/null | grep "inet ${WEB_IP}" | awk '{print $2}' | cut -d/ -f1 || true)
+# Verificar si la IP ya esta configurada (v4 Y v6, para no romper una instalacion
+# que ya tenia IPv4 aplicado en una corrida anterior del script)
+CURRENT_IP=$(ip addr show "$BRIDGE_IFACE" 2>/dev/null | grep "inet ${WEB_IP}/" | awk '{print $2}' | cut -d/ -f1 || true)
+CURRENT_IP6=$(ip -6 addr show "$BRIDGE_IFACE" 2>/dev/null | grep "inet6 ${WEB_IP6}/" | awk '{print $2}' | cut -d/ -f1 || true)
 
-if [[ "$CURRENT_IP" == "$WEB_IP" ]]; then
-    warn "IP ${WEB_IP} ya esta configurada en $BRIDGE_IFACE. Saltando."
+if [[ "$CURRENT_IP" == "$WEB_IP" && "$CURRENT_IP6" == "$WEB_IP6" ]]; then
+    warn "IP ${WEB_IP} e IPv6 ${WEB_IP6} ya estan configuradas en $BRIDGE_IFACE. Saltando."
 else
-    # Crear archivo de configuracion Netplan
+    # Crear archivo de configuracion Netplan (dual-stack: IPv4 igual que antes + IPv6 nuevo)
     NETPLAN_FILE="/etc/netplan/99-siem-static.yaml"
 
     cat > "$NETPLAN_FILE" << EOF
-# Configuracion de red estatica para VLAN 10 - Proyecto SIEM
+# Configuracion de red estatica dual-stack para VLAN 10 - Proyecto SIEM
 # Generado por Vagrant/web-server.sh
 network:
   version: 2
@@ -157,21 +167,26 @@ network:
       dhcp6: no
       addresses:
         - ${WEB_IP}/${WEB_MASK}
+        - ${WEB_IP6}/${WEB_MASK6}
       routes:
         - to: default
           via: ${WEB_GATEWAY}
+          metric: 100
+        - to: ::/0
+          via: ${WEB_GATEWAY6}
           metric: 100
       nameservers:
         addresses:
           - ${WEB_DNS}
           - ${WEB_DNS_FALLBACK}
+          - ${WEB_DNS6}
         search:
           - ${DOMAIN}
 EOF
 
     # Establecer permisos correctos (Netplan lo requiere)
     chmod 600 "$NETPLAN_FILE"
-    log "Archivo Netplan creado: $NETPLAN_FILE"
+    log "Archivo Netplan creado (dual-stack): $NETPLAN_FILE"
 
     # Aplicar configuracion
     netplan generate 2>/dev/null || warn "netplan generate produjo advertencias."
@@ -180,12 +195,20 @@ EOF
     # Esperar un momento para que la interfaz obtenga la IP
     sleep 3
 
-    # Verificar asignacion
+    # Verificar asignacion IPv4 (igual que antes)
     NEW_IP=$(ip addr show "$BRIDGE_IFACE" 2>/dev/null | grep "inet " | awk '{print $2}' | cut -d/ -f1 || true)
     if [[ "$NEW_IP" == "$WEB_IP" ]]; then
         log "IP estatica ${WEB_IP}/${WEB_MASK} configurada correctamente en $BRIDGE_IFACE."
     else
         warn "IP aun no visible en la interfaz (puede tardar unos segundos). IP actual: ${NEW_IP:-'(ninguna)'}"
+    fi
+
+    # Verificar asignacion IPv6 (nuevo)
+    NEW_IP6=$(ip -6 addr show "$BRIDGE_IFACE" 2>/dev/null | grep "inet6 ${WEB_IP6}" | awk '{print $2}' | cut -d/ -f1 || true)
+    if [[ "$NEW_IP6" == "$WEB_IP6" ]]; then
+        log "IPv6 estatica ${WEB_IP6}/${WEB_MASK6} configurada correctamente en $BRIDGE_IFACE."
+    else
+        warn "IPv6 aun no visible en la interfaz (puede tardar unos segundos)."
     fi
 fi
 
@@ -546,6 +569,22 @@ for ip in "${!HOSTS[@]}"; do
     fi
 done
 
+# ---- Dual-stack: entradas IPv6 (aditivas, no se toca lo de IPv4) ----
+declare -A HOSTS6=(
+    ["fd00:10::10"]="web-server web-server.empresa.local"
+    ["fd00:10::20"]="dc-empresa dc-empresa.empresa.local"
+    ["fd00:10::1"]="gateway-vlan10"
+    ["fd00:30::10"]="siem-wazuh siem-wazuh.empresa.local"
+)
+
+for ip6 in "${!HOSTS6[@]}"; do
+    hostname="${HOSTS6[$ip6]}"
+    if ! grep -q "$ip6" /etc/hosts; then
+        echo "$ip6    $hostname" >> /etc/hosts
+        log "Agregado a /etc/hosts (IPv6): $ip6 -> $hostname"
+    fi
+done
+
 
 # ===========================================================================
 # RESUMEN FINAL
@@ -574,6 +613,9 @@ echo -e " ${GREEN}Red:${NC}"
 echo "   IP        : ${WEB_IP}/${WEB_MASK}"
 echo "   Gateway   : ${WEB_GATEWAY}"
 echo "   DNS (DC)  : ${WEB_DNS}"
+echo "   IPv6      : ${WEB_IP6}/${WEB_MASK6}"
+echo "   Gateway6  : ${WEB_GATEWAY6}"
+echo "   DNS6 (DC) : ${WEB_DNS6}"
 
 echo ""
 echo -e " ${YELLOW}Comandos utiles:${NC}"
@@ -581,6 +623,8 @@ echo "   curl http://${WEB_IP}/            # Probar sitio web"
 echo "   ping ${WEB_GATEWAY}               # Probar gateway"
 echo "   ping ${WEB_DNS}                   # Probar DC/DNS"
 echo "   ping ${WAZUH_MANAGER}             # Probar SIEM"
+echo "   ping -6 ${WEB_GATEWAY6}           # Probar gateway IPv6"
+echo "   ping -6 ${WEB_DNS6}               # Probar DC/DNS IPv6"
 echo "   tail -f /var/log/apache2/access.log"
 echo "   systemctl status wazuh-agent"
 echo ""
