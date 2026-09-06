@@ -16,36 +16,36 @@
 #              Windows → "Intel(R) Wi-Fi 6 AX200 160MHz", "Realtek PCIe GbE..."
 # =============================================================================
 
-BRIDGE_INTERFACE = ""   # <-- CAMBIA ESTO según tu sistema operativo/NIC
+BRIDGE_INTERFACE = "Realtek PCIe GbE Family Controller"
 
 Vagrant.configure("2") do |config|
 
   # ---------------------------------------------------------------------------
   # VM 1: Servidor SIEM Wazuh
   # ---------------------------------------------------------------------------
-  config.vm.define "wazuh" do |wazuh|
-    wazuh.vm.box      = "ubuntu/jammy64"
-    wazuh.vm.hostname = "wazuh-server"
+  config.vm.define "wazuh1" do |wazuh1|
+    wazuh1.vm.box      = "ubuntu/jammy64"
+    wazuh1.vm.hostname = "wazuh-server"
 
     # Red en modo puente — la IP fija se asigna desde el script de aprovisionamiento
     # auto_config: false → Vagrant no intenta DHCP; el script configura la IP estática
-    wazuh.vm.network "public_network",
+    wazuh1.vm.network "public_network",
       bridge:      BRIDGE_INTERFACE.empty? ? nil : BRIDGE_INTERFACE,
       auto_config: false
 
-    wazuh.vm.provider "virtualbox" do |vb|
+    wazuh1.vm.provider "virtualbox" do |vb|
       vb.name   = "SIEM-Wazuh-VLAN30"
-      vb.memory = 4096   # 4 GB RAM
-      vb.cpus   = 2
+      vb.memory = 8192   # 8 GB RAM (4GB se queda corto para indexer+manager+dashboard juntos)
+      vb.cpus   = 4      # más CPU reduce el riesgo de timeout al arrancar wazuh-manager
       # Habilitar PAE/NX y nested virtualization si está disponible
       vb.customize ["modifyvm", :id, "--ioapic", "on"]
-      vb.customize ["modifyvm", :id, "--nictype1", "82545EM"]
+      ##vb.customize ["modifyvm", :id, "--nictype1", "82545EM"]
       # Ampliar disco de vídeo (no crítico, evita warnings)
       vb.customize ["modifyvm", :id, "--vram", "16"]
     end
 
     # Script de aprovisionamiento
-    wazuh.vm.provision "shell",
+    wazuh1.vm.provision "shell",
       path:       "scripts/wazuh-server.sh",
       privileged: true
   end
