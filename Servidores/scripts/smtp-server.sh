@@ -217,7 +217,7 @@ bounce    unix  -       -       y       -       0       bounce
 defer     unix  -       -       y       -       0       bounce
 trace     unix  -       -       y       -       0       bounce
 verify    unix  -       -       y       -       1       verify
-flush     unix  n       -       y       1000?   0       flush
+flush     unix  -       -       y       1000?   0       flush
 proxymap  unix  -       -       n       -       -       proxymap
 proxywrite unix -       -       n       -       1       proxymap
 
@@ -264,8 +264,8 @@ apt-get install -y -qq dovecot-core dovecot-imapd dovecot-pop3d
 log "Paquetes dovecot instalados."
 
 cat > /etc/dovecot/dovecot.conf << 'EOF'
-# ==== Protocolos habilitados (IMAP, POP3 y LMTP para entrega local) ====
-protocols = imap pop3 lmtp
+# ==== Protocolos habilitados ====
+protocols = imap pop3
 
 # ==== Interfaces de red habilitadas (IPv4 e IPv6 en todas las IP) ====
 listen = *, ::
@@ -323,8 +323,8 @@ ssl = yes
 ssl_cert = </etc/ssl/mail/mail.cert.pem
 ssl_key = </etc/ssl/mail/mail.key.pem
 
-# ==== Protocolos y compatibilidad TLS ====
-ssl_min_protocol = TLSv1
+# ==== Protocolos y compatibilidad TLS (CORREGIDO A TLSv1.0) ====
+ssl_min_protocol = TLSv1.0
 
 # ==== Permitir certificados autofirmados (CA local) ====
 ssl_client_ca_dir = /etc/ssl/certs
