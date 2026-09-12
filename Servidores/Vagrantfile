@@ -131,12 +131,42 @@ Vagrant.configure("2") do |config|
 
     dc.winrm.username = "vagrant"
     dc.winrm.password = "vagrant"
+    dc.winrm.transport = :ssl
+    dc.winrm.ssl_peer_verification = false
+    dc.winrm.port = 5986
 
     dc.vm.boot_timeout = 1800
 
     dc.winrm.timeout = 1800
     dc.winrm.retry_limit = 100
     dc.winrm.max_wait_time = 1800
+
+
+    # -------------------------------------------------------------------------
+    # NOTA: AllowUnencrypted en WinRM
+    #
+    # El box trae por defecto AllowUnencrypted = false, lo que impide que
+    # Vagrant se autentique por WinRM (transporte plaintext). Esto NO se
+    # puede arreglar de forma automatica desde el Vagrantfile: se necesita
+    # una sesion interactiva real dentro de Windows (VBoxManage guestcontrol
+    # corre en Sesion 0, sin escritorio interactivo, y ahi la elevacion UAC
+    # esta bloqueada por diseno del sistema operativo).
+    #
+    # SOLUCION APLICADA (una sola vez, ya hecha): se arranco la VM maestra
+    # (la que Vagrant usa como base para clonar) directamente desde
+    # VirtualBox, se inicio sesion como vagrant, se abrio PowerShell como
+    # Administrador y se corrio:
+    #
+    #   winrm set winrm/config/service '@{AllowUnencrypted="true"}'
+    #
+    # y se apago limpiamente la VM. Como los clones de windows-dc se crean
+    # a partir de esa maestra, todos los clones nuevos (incluso despues de
+    # "vagrant destroy") ya nacen con este ajuste aplicado.
+    #
+    # Si en el futuro se reimporta el box desde cero (nueva version, otra
+    # maquina, etc.), hay que repetir este paso una vez sobre la nueva
+    # maestra antes de usar "vagrant up".
+    # -------------------------------------------------------------------------
 
 
     # -------------------------------------------------------------------------
@@ -162,6 +192,8 @@ Vagrant.configure("2") do |config|
       vb.customize ["modifyvm", :id, "--vram", "32"]
       vb.customize ["modifyvm", :id, "--clipboard", "disabled"]
       vb.customize ["modifyvm", :id, "--draganddrop", "disabled"]
+      vb.customize ["modifyvm", :id, "--ioapic", "on"]
+      vb.customize ["modifyvm", :id, "--paravirtprovider", "default"]
 
     end
 
