@@ -1,0 +1,39 @@
+enable
+configure terminal
+
+hostname SW2
+
+vlan 30
+ name GESTION
+exit
+
+! =========================================================
+! Gi0/1 — Conexion al Router Gi0/0/1 (access, no trunk)
+! =========================================================
+interface GigabitEthernet0/1
+ description Uplink-Router-Gi0/0/1
+ switchport mode access
+ switchport access vlan 30
+ no shutdown
+
+! =========================================================
+! Fa0/1 — Host Gestion (SIEM, Kali, pfSense como VMs)
+! =========================================================
+interface FastEthernet0/1
+ description Host-Gestion-VLAN30
+ switchport mode access
+ switchport access vlan 30
+ spanning-tree portfast
+ no shutdown
+
+! =========================================================
+! IP de gestion del switch
+! =========================================================
+interface vlan 30
+ ip address 192.168.30.251 255.255.255.0
+ no shutdown
+
+ip default-gateway 192.168.30.1
+
+end
+write memory

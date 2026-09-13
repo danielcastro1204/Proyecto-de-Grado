@@ -1,0 +1,55 @@
+enable
+configure terminal
+
+hostname SW1
+
+vlan 10
+ name SERVIDORES
+vlan 20
+ name CLIENTES
+exit
+
+! =========================================================
+! Gi0/1 — Trunk al Router Gi0/0/0
+! Debe transportar VLAN10 y VLAN20
+! =========================================================
+interface GigabitEthernet0/1
+ description Trunk-Router-Gi0/0/0
+ switchport mode trunk
+ switchport trunk allowed vlan 10,20
+ no shutdown
+
+! =========================================================
+! Fa0/1 — Host Servidores (todas las VMs de VLAN10)
+! Web, DC, DHCPv4, DHCPv6, DNS1, DNS2, SMTP, NTP
+! van como VMs dentro de este unico host fisico
+! =========================================================
+interface FastEthernet0/1
+ description Host-Servidores-VLAN10
+ switchport mode access
+ switchport access vlan 10
+ spanning-tree portfast
+ no shutdown
+
+! =========================================================
+! Fa0/2 — Host Clientes (todas las VMs de VLAN20)
+! Win1, Win2, Linux1, Linux2 van dentro de este host
+! =========================================================
+interface FastEthernet0/2
+ description Host-Clientes-VLAN20
+ switchport mode access
+ switchport access vlan 20
+ spanning-tree portfast
+ no shutdown
+
+! =========================================================
+! IP de gestion del switch
+! =========================================================
+interface vlan 10
+ ip address 192.168.10.251 255.255.255.0
+ no shutdown
+
+ip default-gateway 192.168.10.1
+
+end
+write memory

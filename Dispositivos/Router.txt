@@ -1,0 +1,63 @@
+enable
+configure terminal
+
+hostname R1-CORE
+no ip domain-lookup
+ip domain-name empresa.local
+ip routing
+ipv6 unicast-routing
+
+! =========================================================
+! Limpiar direcciones 2001:DB8 sobrantes
+! =========================================================
+interface GigabitEthernet0/0/0
+ no ipv6 address 2001:DB8:ACAD:B::1/64
+interface GigabitEthernet0/0/1
+ no ipv6 address 2001:DB8:ACAD:A::1/64
+interface Serial0/1/0
+ no ipv6 address 2001:DB8:AAAA:1::1/64
+
+! =========================================================
+! Gi0/0/0 — Trunk hacia SW1 (lleva VLAN10 + VLAN20)
+! =========================================================
+interface GigabitEthernet0/0/0
+ description Trunk-SW1
+ no ip address
+ no shutdown
+
+interface GigabitEthernet0/0/0.1
+ description VLAN10-SERVIDORES
+ encapsulation dot1Q 10
+ ip address 192.168.10.1 255.255.255.0
+ ipv6 address FD00:10::1/64
+ ipv6 enable
+ no shutdown
+
+interface GigabitEthernet0/0/0.2
+ description VLAN20-CLIENTES
+ encapsulation dot1Q 20
+ ip address 192.168.20.1 255.255.255.0
+ ip helper-address 192.168.10.30
+ ipv6 address FD00:20::1/64
+ ipv6 enable
+ ipv6 nd managed-config-flag
+ ipv6 nd other-config-flag
+ ipv6 dhcp relay destination FD00:10::40
+ no shutdown
+
+! =========================================================
+! Gi0/0/1 — Hacia SW2 (solo VLAN30, sin trunk)
+! =========================================================
+interface GigabitEthernet0/0/1
+ description VLAN30-GESTION-SW2
+ ip address 192.168.30.1 255.255.255.0
+ ipv6 address FD00:30::1/64
+ ipv6 enable
+ no shutdown
+
+ip name-server 192.168.10.50
+ip name-server 192.168.10.60
+ntp server 192.168.10.80
+
+end
+write memory
