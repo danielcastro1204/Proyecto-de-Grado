@@ -56,11 +56,16 @@ network:
       # Sin ruta por defecto aquí: dejamos que el tráfico a internet siga
       # saliendo por la NAT de Vagrant (enp0s3). Esta interfaz solo necesita
       # la IP fija para hablar dentro de la VLAN 30.
-      # Si algún día conectas la topología física real con gateway en
-      # ${GATEWAY} y quieres que el tráfico salga por ahí, puedes reactivar:
-      # routes:
-      #   - to: 0.0.0.0/0
-      #     via: ${GATEWAY}
+      #
+      # SÍ agregamos rutas específicas (no 0.0.0.0/0) hacia las otras VLANs
+      # del laboratorio a través del router Cisco (192.168.30.1). Esto es
+      # seguro porque solo aplica a esas dos subredes puntuales; el resto
+      # del tráfico (incluido internet) sigue usando la NAT.
+      routes:
+        - to: 192.168.10.0/24
+          via: ${GATEWAY}
+        - to: 192.168.20.0/24
+          via: ${GATEWAY}
       nameservers:
         addresses:
           - ${DNS}
@@ -287,7 +292,7 @@ show_summary() {
   echo -e "  ${YELLOW}Puertos abiertos:${NC} 22, 443, 514/udp, 1514-1516, 55000"
   echo -e "  ${YELLOW}Logs router     :${NC} UDP 514 (0.0.0.0/0 permitido)"
   echo ""
-  echo -e "${GREEN}${NC}"
+  echo -e "${GREEN}══════════════════════════════════════════════════════════════${NC}"
 }
 
 # =============================================================================
