@@ -3,17 +3,6 @@
 # dns1-server.sh  |  Servidor DNS Primario/Maestro (BIND9) - Ubuntu 22.04 LTS
 # Proyecto SIEM - Integrante B | VLAN 10 (Servidores) | 192.168.10.50
 # =============================================================================
-# Este script aprovisiona el servidor DNS1 (maestro) del laboratorio. Realiza:
-#   1. Actualizacion del sistema
-#   2. Configuracion de IP fija dual-stack (192.168.10.50/24 + fd00:10::50/64)
-#   3. Instalacion de BIND9
-#   4. Generacion de la clave TSIG compartida con DNS2 (transferencia segura)
-#   5. Creacion de la zona directa "empresa.local" y las zonas inversas
-#      IPv4 (10.168.192.in-addr.arpa) e IPv6 (fd00:10::/64)
-#   6. Configuracion del firewall UFW (puerto 53 tcp/udp)
-#   7. Instalacion del agente Wazuh
-#   8. Configuracion de /etc/hosts y resumen final
-# =============================================================================
 
 set -euo pipefail
 IFS=$'\n\t'
@@ -84,7 +73,7 @@ apt-get install -y -qq curl wget gnupg lsb-release ca-certificates apt-transport
 log "Paquetes base instalados."
 
 # ===========================================================================
-# PASO 3: IP fija dual-stack via Netplan (DNS1 se apunta a si mismo)
+# PASO 3: IP fija dual-stack via Netplan
 # ===========================================================================
 info "PASO 3: Configurando IP fija ${SRV_IP}/${SRV_MASK} y ${SRV_IP6}/${SRV_PREFIX6}..."
 NETPLAN_FILE="/etc/netplan/99-siem-static.yaml"
@@ -103,13 +92,13 @@ network:
         - to: default
           via: ${VM_GATEWAY}
           metric: 100
-        - to: ::/0
-          via: ${VM_GATEWAY6}
+        - to: "::/0"
+          via: "${VM_GATEWAY6}"
           metric: 100
       nameservers:
         addresses:
-          - 127.0.0.1
-          - ${DNS2_IP}
+          - 1.1.1.1
+          - 8.8.8.8
         search:
           - ${DOMAIN}
 EOF
@@ -136,8 +125,6 @@ log "Paquete bind9 instalado."
 
 # ===========================================================================
 # PASO 5: Escribir la clave TSIG compartida con DNS2
-# El secreto viaja fijo desde el Vagrantfile (TSIG_SECRET) para que DNS1 y
-# DNS2 queden sincronizados automaticamente, sin pasos manuales de copiado.
 # ===========================================================================
 info "PASO 5: Configurando clave TSIG para transferencia segura con DNS2..."
 TSIG_KEYFILE="/etc/bind/keys/tsig-ns.key"
@@ -149,7 +136,7 @@ key "${TSIG_KEY_NAME}" {
 EOF
 chmod 640 "$TSIG_KEYFILE"
 chown root:bind "$TSIG_KEYFILE"
-log "Clave TSIG configurada en ${TSIG_KEYFILE} (compartida con DNS2)."
+log "Clave TSIG configurada en ${TSIG_KEYFILE}."
 
 # ===========================================================================
 # PASO 6: Zona directa "empresa.local"
@@ -197,11 +184,11 @@ ntp   IN  A     192.168.10.80
 ntp   IN  AAAA  fd00:10::80
 
 ; VLAN gestion
-siem      IN  A  192.168.30.10
+siem      IN  A     192.168.30.10
 siem      IN  AAAA  fd00:30::10
-kali      IN  A  192.168.30.20
+kali      IN  A     192.168.30.20
 kali      IN  AAAA  fd00:30::20
-pfsense   IN  A  192.168.30.30
+pfsense   IN  A     192.168.30.30
 pfsense   IN  AAAA  fd00:30::30
 
 ; Registros de correo y politicas de envio
@@ -251,10 +238,6 @@ cat > "$REV6_ZONE_FILE" << EOF
     IN NS ns1.${DOMAIN}.
     IN NS ns2.${DOMAIN}.
 
-; Los nombres de host son relativos al origen de la zona
-; (0.0.0.0.0.0.0.0.0.1.0.0.0.0.d.f.ip6.arpa, definido en named.conf.local),
-; es decir, cada linea representa los 16 nibbles del identificador de host
-; para las direcciones fd00:10::10, ::20, ::30 ... ::80.
 0.1.0.0.0.0.0.0.0.0.0.0.0.0.0.0 IN PTR web-server.${DOMAIN}.
 0.2.0.0.0.0.0.0.0.0.0.0.0.0.0.0 IN PTR dc-empresa.${DOMAIN}.
 0.3.0.0.0.0.0.0.0.0.0.0.0.0.0.0 IN PTR dhcpv4-server.${DOMAIN}.
@@ -264,7 +247,6 @@ cat > "$REV6_ZONE_FILE" << EOF
 0.7.0.0.0.0.0.0.0.0.0.0.0.0.0.0 IN PTR smtp.${DOMAIN}.
 0.8.0.0.0.0.0.0.0.0.0.0.0.0.0.0 IN PTR ntp.${DOMAIN}.
 EOF
-warn "Nota: los registros PTR IPv6 corresponden a fd00:10::10, ::20 ... ::80; verifica con 'dig -x' tras el aprovisionamiento."
 
 chown -R bind:bind /etc/bind/zones
 
@@ -280,7 +262,7 @@ include "/etc/bind/keys/tsig-ns.key";
 zone "${DOMAIN}" {
     type master;
     file "${ZONE_FILE}";
-    allow-transfer { key "${TSIG_KEY_NAME}"; ${DNS2_IP}; ${DNS2_IP6}; };
+    allow-transfer { key "${TSIG_KEY_NAME}"; };
     also-notify { ${DNS2_IP}; ${DNS2_IP6}; };
 };
 
@@ -288,7 +270,7 @@ zone "${DOMAIN}" {
 zone "10.168.192.in-addr.arpa" {
     type master;
     file "${REV4_ZONE_FILE}";
-    allow-transfer { key "${TSIG_KEY_NAME}"; ${DNS2_IP}; ${DNS2_IP6}; };
+    allow-transfer { key "${TSIG_KEY_NAME}"; };
     also-notify { ${DNS2_IP}; ${DNS2_IP6}; };
 };
 
@@ -296,7 +278,7 @@ zone "10.168.192.in-addr.arpa" {
 zone "0.0.0.0.0.0.0.0.0.1.0.0.0.0.d.f.ip6.arpa" {
     type master;
     file "${REV6_ZONE_FILE}";
-    allow-transfer { key "${TSIG_KEY_NAME}"; ${DNS2_IP}; ${DNS2_IP6}; };
+    allow-transfer { key "${TSIG_KEY_NAME}"; };
     also-notify { ${DNS2_IP}; ${DNS2_IP6}; };
 };
 EOF
@@ -335,12 +317,40 @@ EOF
 named-checkconf && log "Sintaxis de named.conf validada." || warn "named.conf presenta advertencias de sintaxis."
 named-checkzone "${DOMAIN}" "$ZONE_FILE" || warn "Zona directa presenta advertencias."
 named-checkzone "10.168.192.in-addr.arpa" "$REV4_ZONE_FILE" || warn "Zona inversa IPv4 presenta advertencias."
+named-checkzone "0.0.0.0.0.0.0.0.0.1.0.0.0.0.d.f.ip6.arpa" "$REV6_ZONE_FILE" || warn "Zona inversa IPv6 presenta advertencias."
 
 systemctl daemon-reload
 systemctl enable named
 systemctl restart named
 sleep 2
-systemctl is-active --quiet named && log "Servicio BIND9 (named) activo." || warn "named no esta activo. Revisar: journalctl -u named"
+
+# Apuntar Netplan a BIND local una vez que el servicio ya esta corriendo
+cat > "$NETPLAN_FILE" << EOF
+network:
+  version: 2
+  renderer: networkd
+  ethernets:
+    ${BRIDGE_IFACE}:
+      dhcp4: no
+      dhcp6: no
+      addresses:
+        - ${SRV_IP}/${SRV_MASK}
+        - ${SRV_IP6}/${SRV_PREFIX6}
+      routes:
+        - to: default
+          via: ${VM_GATEWAY}
+          metric: 100
+        - to: "::/0"
+          via: "${VM_GATEWAY6}"
+          metric: 100
+      nameservers:
+        addresses:
+          - 127.0.0.1
+          - ${DNS2_IP}
+        search:
+          - ${DOMAIN}
+EOF
+netplan apply 2>/dev/null || warn "netplan apply final produjo advertencias."
 
 # ===========================================================================
 # PASO 10: Firewall UFW
@@ -356,7 +366,6 @@ ufw allow out to "${SIEM_IP}" port 1514 proto tcp comment 'Wazuh logs'
 ufw allow out to "${SIEM_IP}" port 1515 proto tcp comment 'Wazuh registro'
 ufw --force enable
 log "Firewall UFW configurado."
-ufw status verbose
 
 # ===========================================================================
 # PASO 11: Agente Wazuh
@@ -390,7 +399,6 @@ else
     systemctl enable wazuh-agent
     systemctl start wazuh-agent
     sleep 3
-    systemctl is-active --quiet wazuh-agent && log "Servicio wazuh-agent activo." || warn "wazuh-agent no esta activo."
 fi
 
 # ===========================================================================
@@ -430,23 +438,6 @@ echo ""
 echo -e "${CYAN}============================================================${NC}"
 echo -e "${CYAN} RESUMEN FINAL - Servidor DNS1 (Maestro)${NC}"
 echo -e "${CYAN}============================================================${NC}"
-echo ""
-echo -e " ${GREEN}Servicio BIND9 (named):${NC}"
-systemctl is-active named && echo "   Estado: ACTIVO" || echo "   Estado: INACTIVO"
-echo "   Zona directa    : ${DOMAIN} -> ${ZONE_FILE}"
-echo "   Zona inversa v4 : 10.168.192.in-addr.arpa -> ${REV4_ZONE_FILE}"
-echo "   Zona inversa v6 : fd00:10::/64 -> ${REV6_ZONE_FILE}"
-echo "   Transferencias  : autenticadas con TSIG (${TSIG_KEYFILE}) hacia DNS2 (${DNS2_IP})"
-echo ""
-echo -e " ${YELLOW}Comandos utiles:${NC}"
-echo "   dig @${SRV_IP} web-server.${DOMAIN}"
-echo "   dig @${SRV_IP} AAAA web-server.${DOMAIN}"
-echo "   rndc notify ${DOMAIN}"
-echo ""
-echo -e " ${GREEN}Red:${NC}"
-echo "   IPv4 : ${SRV_IP}/${SRV_MASK}   Gateway: ${VM_GATEWAY}"
-echo "   IPv6 : ${SRV_IP6}/${SRV_PREFIX6}   Gateway: ${VM_GATEWAY6}"
-echo ""
-echo -e "${CYAN}============================================================${NC}"
+systemctl is-active named && echo "  Estado: ACTIVO" || echo "  Estado: INACTIVO"
 echo -e "${GREEN} APROVISIONAMIENTO COMPLETADO - dns1-server listo${NC}"
 echo -e "${CYAN}============================================================${NC}"

@@ -3,16 +3,6 @@
 # dns2-server.sh  |  Servidor DNS Secundario/Esclavo (BIND9) - Ubuntu 22.04 LTS
 # Proyecto SIEM - Integrante B | VLAN 10 (Servidores) | 192.168.10.60
 # =============================================================================
-# Este script aprovisiona el servidor DNS2 (esclavo) del laboratorio. Realiza:
-#   1. Actualizacion del sistema
-#   2. Configuracion de IP fija dual-stack (192.168.10.60/24 + fd00:10::60/64)
-#   3. Instalacion de BIND9
-#   4. Configuracion de la clave TSIG compartida con DNS1
-#   5. Configuracion de las zonas como esclavas (AXFR autenticado desde DNS1)
-#   6. Configuracion del firewall UFW (puerto 53 tcp/udp)
-#   7. Instalacion del agente Wazuh
-#   8. Configuracion de /etc/hosts y resumen final
-# =============================================================================
 
 set -euo pipefail
 IFS=$'\n\t'
@@ -80,7 +70,7 @@ apt-get install -y -qq curl wget gnupg lsb-release ca-certificates apt-transport
 log "Paquetes base instalados."
 
 # ===========================================================================
-# PASO 3: IP fija dual-stack via Netplan (DNS2 usa DNS1 y a si mismo)
+# PASO 3: IP fija dual-stack via Netplan (con DNS temporales para aprovisionamiento)
 # ===========================================================================
 info "PASO 3: Configurando IP fija ${SRV_IP}/${SRV_MASK} y ${SRV_IP6}/${SRV_PREFIX6}..."
 NETPLAN_FILE="/etc/netplan/99-siem-static.yaml"
@@ -99,13 +89,13 @@ network:
         - to: default
           via: ${VM_GATEWAY}
           metric: 100
-        - to: ::/0
-          via: ${VM_GATEWAY6}
+        - to: "::/0"
+          via: "${VM_GATEWAY6}"
           metric: 100
       nameservers:
         addresses:
-          - ${DNS1_IP}
-          - 127.0.0.1
+          - 1.1.1.1
+          - 8.8.8.8
         search:
           - ${DOMAIN}
 EOF
@@ -153,28 +143,28 @@ chown root:bind "$TSIG_KEYFILE"
 log "Clave TSIG configurada en ${TSIG_KEYFILE} (identica a la de DNS1)."
 
 # ===========================================================================
-# PASO 6: named.conf.local (zonas esclavas) y named.conf.options
+# PASO 6: named.conf.local (zonas secundarias) y named.conf.options
 # ===========================================================================
-info "PASO 6: Configurando named.conf.local (zonas esclavas, AXFR desde DNS1)..."
+info "PASO 6: Configurando named.conf.local (zonas secundarias, AXFR desde DNS1)..."
 cat > /etc/bind/named.conf.local << EOF
 include "/etc/bind/keys/tsig-ns.key";
 
 zone "${DOMAIN}" {
-    type slave;
+    type secondary;
     file "/var/cache/bind/db.${DOMAIN}";
-    masters { ${DNS1_IP} key "${TSIG_KEY_NAME}"; };
+    primaries { ${DNS1_IP} key "${TSIG_KEY_NAME}"; };
 };
 
 zone "10.168.192.in-addr.arpa" {
-    type slave;
+    type secondary;
     file "/var/cache/bind/db.192.168.10";
-    masters { ${DNS1_IP} key "${TSIG_KEY_NAME}"; };
+    primaries { ${DNS1_IP} key "${TSIG_KEY_NAME}"; };
 };
 
 zone "0.0.0.0.0.0.0.0.0.1.0.0.0.0.d.f.ip6.arpa" {
-    type slave;
+    type secondary;
     file "/var/cache/bind/db.fd00-10";
-    masters { ${DNS1_IP} key "${TSIG_KEY_NAME}"; };
+    primaries { ${DNS1_IP} key "${TSIG_KEY_NAME}"; };
 };
 EOF
 
@@ -193,7 +183,7 @@ acl "trusted-hosts" {
 options {
     directory "/var/cache/bind";
 
-    // Esclavo actuando como secundario autoritativo (sin recursion para clientes)
+    // Esclavo actuando como secundario autoritativo (sin recursion externa)
     recursion no;
     allow-recursion { none; };
 
@@ -222,6 +212,35 @@ info "Forzando transferencia inicial de zonas (AXFR) desde DNS1..."
 rndc retransfer "${DOMAIN}" 2>/dev/null || warn "No se pudo forzar retransfer de ${DOMAIN} todavia (DNS1 puede no estar listo aun)."
 sleep 2
 rndc retransfer "10.168.192.in-addr.arpa" 2>/dev/null || true
+rndc retransfer "0.0.0.0.0.0.0.0.0.1.0.0.0.0.d.f.ip6.arpa" 2>/dev/null || true
+
+# Apuntar Netplan a DNS1 y a si mismo localmente
+cat > "$NETPLAN_FILE" << EOF
+network:
+  version: 2
+  renderer: networkd
+  ethernets:
+    ${BRIDGE_IFACE}:
+      dhcp4: no
+      dhcp6: no
+      addresses:
+        - ${SRV_IP}/${SRV_MASK}
+        - ${SRV_IP6}/${SRV_PREFIX6}
+      routes:
+        - to: default
+          via: ${VM_GATEWAY}
+          metric: 100
+        - to: "::/0"
+          via: "${VM_GATEWAY6}"
+          metric: 100
+      nameservers:
+        addresses:
+          - ${DNS1_IP}
+          - 127.0.0.1
+        search:
+          - ${DOMAIN}
+EOF
+netplan apply 2>/dev/null || warn "netplan apply final produjo advertencias."
 
 # ===========================================================================
 # PASO 7: Firewall UFW
@@ -237,7 +256,6 @@ ufw allow out to "${SIEM_IP}" port 1514 proto tcp comment 'Wazuh logs'
 ufw allow out to "${SIEM_IP}" port 1515 proto tcp comment 'Wazuh registro'
 ufw --force enable
 log "Firewall UFW configurado."
-ufw status verbose
 
 # ===========================================================================
 # PASO 8: Agente Wazuh
@@ -271,7 +289,6 @@ else
     systemctl enable wazuh-agent
     systemctl start wazuh-agent
     sleep 3
-    systemctl is-active --quiet wazuh-agent && log "Servicio wazuh-agent activo." || warn "wazuh-agent no esta activo."
 fi
 
 # ===========================================================================
@@ -311,22 +328,6 @@ echo ""
 echo -e "${CYAN}============================================================${NC}"
 echo -e "${CYAN} RESUMEN FINAL - Servidor DNS2 (Esclavo)${NC}"
 echo -e "${CYAN}============================================================${NC}"
-echo ""
-echo -e " ${GREEN}Servicio BIND9 (named):${NC}"
-systemctl is-active named && echo "   Estado: ACTIVO" || echo "   Estado: INACTIVO"
-echo "   Maestro (AXFR)  : ${DNS1_IP} (TSIG: tsig-ns.)"
-echo "   Zonas esclavas  : ${DOMAIN}, 10.168.192.in-addr.arpa, fd00:10::/64 (reversa)"
-echo "   Cache de zonas  : /var/cache/bind/"
-echo ""
-echo -e " ${YELLOW}Comandos utiles:${NC}"
-echo "   dig @${SRV_IP} web-server.${DOMAIN}"
-echo "   rndc retransfer ${DOMAIN}"
-echo "   ls -la /var/cache/bind/"
-echo ""
-echo -e " ${GREEN}Red:${NC}"
-echo "   IPv4 : ${SRV_IP}/${SRV_MASK}   Gateway: ${VM_GATEWAY}"
-echo "   IPv6 : ${SRV_IP6}/${SRV_PREFIX6}   Gateway: ${VM_GATEWAY6}"
-echo ""
-echo -e "${CYAN}============================================================${NC}"
+systemctl is-active named && echo "  Estado: ACTIVO" || echo "  Estado: INACTIVO"
 echo -e "${GREEN} APROVISIONAMIENTO COMPLETADO - dns2-server listo${NC}"
 echo -e "${CYAN}============================================================${NC}"
