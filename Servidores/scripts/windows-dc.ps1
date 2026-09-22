@@ -22,6 +22,11 @@ $VM_GATEWAY = if ($env:VM_GATEWAY) { $env:VM_GATEWAY } else { "192.168.10.1" }
 $SIEM_IP    = if ($env:SIEM_IP)    { $env:SIEM_IP }    else { "192.168.30.10" }
 $DOMAIN     = if ($env:DOMAIN)     { $env:DOMAIN }     else { "empresa.local" }
 
+# ---- Dual-stack: direccionamiento IPv6 (VLAN10 - fd00:10::/64, segun topologia) ----
+$VM_IP6      = if ($env:VM_IP6)      { $env:VM_IP6 }      else { "fd00:10::20" }
+$VM_GATEWAY6 = if ($env:VM_GATEWAY6) { $env:VM_GATEWAY6 } else { "fd00:10::1" }
+$PREFIX6     = 64
+
 $SUBNET_PREFIX = 24
 
 $HOSTNAME = "dc-empresa"
@@ -35,6 +40,135 @@ Write-Host "SIEM        : $SIEM_IP"
 Write-Host "Dominio     : $DOMAIN"
 Write-Host "Hostname    : $HOSTNAME"
 Write-Host ""
+
+
+# =============================================================================
+# FUNCION: DUAL-STACK IPv6 (autocontenida e idempotente)
+#
+# Se llama en 3 puntos del script:
+#   1) Antes del "exit 0" si AD ya estaba instalado (retrofit en un DC
+#      que ya funciona, ej. al correr "vagrant provision windows-dc").
+#   2) En el flujo normal de un DC nuevo, en el lugar donde antes se
+#      DESHABILITABA IPv6.
+#   3) Al final, justo cuando ya existe el rol DNS, para poder registrar
+#      los AAAA (en los dos primeros puntos el rol DNS puede no estar listo
+#      y esa parte simplemente se omite sin error).
+# =============================================================================
+
+function Set-DualStackIPv6 {
+    param(
+        [string]$Ip6Address,
+        [string]$Gateway6,
+        [int]$Prefix6 = 64,
+        [string]$Domain,
+        [switch]$TryRegisterAAAA
+    )
+
+    Write-Host ""
+    Write-Host "Configurando IPv6 dual-stack ($Ip6Address/$Prefix6 via $Gateway6)..."
+
+    $adapters = Get-NetAdapter | Where-Object { $_.Status -eq "Up" }
+    $bridgeAdapter = $null
+
+    foreach ($adapter in $adapters) {
+        $ips4 = Get-NetIPAddress -InterfaceIndex $adapter.ifIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue
+        foreach ($ip in $ips4) {
+            if ($ip.IPAddress -notlike "10.0.2.*") {
+                $bridgeAdapter = $adapter
+                break
+            }
+        }
+        if ($bridgeAdapter) { break }
+    }
+    if (-not $bridgeAdapter) {
+        $bridgeAdapter = $adapters | Sort-Object InterfaceIndex -Descending | Select-Object -First 1
+    }
+    if (-not $bridgeAdapter) {
+        Write-Warning "No se pudo identificar el adaptador para configurar IPv6."
+        return
+    }
+
+    $ifIndex = $bridgeAdapter.ifIndex
+    $ifAlias = $bridgeAdapter.Name
+
+    # Re-habilitar IPv6 en el adaptador (por si una corrida anterior lo deshabilito)
+    Enable-NetAdapterBinding -Name $ifAlias -ComponentID ms_tcpip6 -ErrorAction SilentlyContinue
+    Start-Sleep -Seconds 2
+
+    # Quitar una asignacion previa identica antes de re-crearla (idempotente)
+    Get-NetIPAddress -InterfaceIndex $ifIndex -AddressFamily IPv6 -ErrorAction SilentlyContinue |
+        Where-Object { $_.IPAddress -eq $Ip6Address } |
+        Remove-NetIPAddress -Confirm:$false -ErrorAction SilentlyContinue
+
+    Get-NetRoute -InterfaceIndex $ifIndex -AddressFamily IPv6 -ErrorAction SilentlyContinue |
+        Where-Object { $_.DestinationPrefix -eq "::/0" } |
+        Remove-NetRoute -Confirm:$false -ErrorAction SilentlyContinue
+
+    New-NetIPAddress `
+        -InterfaceIndex $ifIndex `
+        -AddressFamily IPv6 `
+        -IPAddress $Ip6Address `
+        -PrefixLength $Prefix6 `
+        -DefaultGateway $Gateway6 `
+        -ErrorAction SilentlyContinue | Out-Null
+
+    Write-Host "IPv6 configurada: $Ip6Address/$Prefix6 via $Gateway6 en $ifAlias"
+
+    # Ruta hacia VLAN 30 (gestion) tambien por IPv6, igual que ya existe para IPv4
+    try {
+        New-NetRoute `
+            -DestinationPrefix "fd00:30::/64" `
+            -InterfaceIndex $ifIndex `
+            -AddressFamily IPv6 `
+            -NextHop $Gateway6 `
+            -PolicyStore ActiveStore `
+            -ErrorAction SilentlyContinue | Out-Null
+    }
+    catch {
+        # No es critico; puede ya existir.
+    }
+
+    # Agregar "::1" al DNS del adaptador SIN quitar el/los DNS IPv4 existentes
+    try {
+        $existingV4Dns = (Get-DnsClientServerAddress -InterfaceIndex $ifIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue).ServerAddresses
+        if (-not $existingV4Dns -or $existingV4Dns.Count -eq 0) { $existingV4Dns = @("127.0.0.1") }
+        $combinedDns = @($existingV4Dns) + @("::1")
+        Set-DnsClientServerAddress -InterfaceIndex $ifIndex -ServerAddresses $combinedDns -ErrorAction SilentlyContinue
+        Write-Host "DNS del adaptador (dual-stack): $($combinedDns -join ', ')"
+    }
+    catch {
+        Write-Warning "No se pudo ajustar el DNS dual-stack del adaptador."
+    }
+
+    # Registrar AAAA en la zona del dominio (solo si el rol DNS ya existe; si no, se omite sin error)
+    if ($TryRegisterAAAA) {
+        try {
+            Import-Module DnsServer -ErrorAction Stop
+
+            $records = @{
+                "dc-empresa" = $Ip6Address
+                "web-server" = "fd00:10::10"
+            }
+
+            foreach ($name in $records.Keys) {
+                $addr = $records[$name]
+                $exists = Get-DnsServerResourceRecord -ZoneName $Domain -Name $name -RRType AAAA -ErrorAction SilentlyContinue |
+                    Where-Object { $_.RecordData.IPv6Address.IPAddressToString -eq $addr }
+
+                if (-not $exists) {
+                    Add-DnsServerResourceRecordAAAA -ZoneName $Domain -Name $name -IPv6Address $addr -ErrorAction SilentlyContinue
+                    Write-Host "  AAAA agregado: $name.$Domain -> $addr"
+                }
+                else {
+                    Write-Host "  AAAA ya existia: $name.$Domain -> $addr"
+                }
+            }
+        }
+        catch {
+            Write-Host "  (Rol DNS aun no disponible; los registros AAAA se intentaran mas adelante en el aprovisionamiento)"
+        }
+    }
+}
 
 
 # =============================================================================
@@ -53,6 +187,12 @@ if ($adFeature.Installed) {
         Write-Host "Dominio detectado: $($currentDomain.DNSRoot)"
         Write-Host "No se vuelve a realizar la promocion."
         Write-Host ""
+
+        # Retrofit dual-stack: aunque no se repromueva el DC, si se asegura
+        # que tenga IPv6 configurado (por si viene de una corrida anterior
+        # sin dual-stack, o de "vagrant provision windows-dc").
+        Set-DualStackIPv6 -Ip6Address $VM_IP6 -Gateway6 $VM_GATEWAY6 -Prefix6 $PREFIX6 -Domain $DOMAIN -TryRegisterAAAA
+
         exit 0
     }
     catch {
@@ -249,18 +389,10 @@ catch {
 
 
 # =============================================================================
-# DESHABILITAR IPV6
+# CONFIGURAR IPv6 (DUAL-STACK)
 # =============================================================================
 
-Write-Host ""
-Write-Host "Deshabilitando IPv6 en el adaptador VLAN 10..."
-
-Disable-NetAdapterBinding `
-    -Name $ifAlias `
-    -ComponentID ms_tcpip6 `
-    -ErrorAction SilentlyContinue
-
-Write-Host "IPv6 deshabilitado."
+Set-DualStackIPv6 -Ip6Address $VM_IP6 -Gateway6 $VM_GATEWAY6 -Prefix6 $PREFIX6 -Domain $DOMAIN
 
 
 # =============================================================================
@@ -501,17 +633,21 @@ Write-Host ""
 Write-Host "[9/9] Configurando DNS del controlador..."
 
 try {
-    # Ahora que DNS ya existe, podemos apuntar el DC a si mismo.
+    # Ahora que DNS ya existe, podemos apuntar el DC a si mismo (dual-stack).
     Set-DnsClientServerAddress `
         -InterfaceIndex $ifIndex `
-        -ServerAddresses @("127.0.0.1") `
+        -ServerAddresses @("127.0.0.1", "::1") `
         -ErrorAction SilentlyContinue
 
-    Write-Host "DNS del DC configurado hacia 127.0.0.1."
+    Write-Host "DNS del DC configurado hacia 127.0.0.1 y ::1."
 }
 catch {
     Write-Warning "No se pudo configurar DNS hacia localhost."
 }
+
+# Con el rol DNS ya instalado y promovido, este es el punto correcto para
+# registrar los AAAA de forma definitiva.
+Set-DualStackIPv6 -Ip6Address $VM_IP6 -Gateway6 $VM_GATEWAY6 -Prefix6 $PREFIX6 -Domain $DOMAIN -TryRegisterAAAA
 
 
 # =============================================================================
@@ -525,6 +661,7 @@ Write-Host "============================================================"
 Write-Host ""
 Write-Host "Hostname : $HOSTNAME"
 Write-Host "IP       : $VM_IP"
+Write-Host "IPv6     : $VM_IP6"
 Write-Host "Dominio  : $DOMAIN"
 Write-Host "NetBIOS  : $NETBIOS"
 Write-Host ""

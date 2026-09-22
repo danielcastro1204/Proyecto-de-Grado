@@ -27,6 +27,50 @@ GATEWAY   = "192.168.10.1"
 DC_IP6    = "fd00:10::20"
 GATEWAY6  = "fd00:10::1"
 
+# =============================================================================
+# CORRECCION: estas constantes se usaban mas abajo (DHCPv4, DHCPv6, DNS1,
+# DNS2, SMTP, NTP) pero nunca se habian definido, lo que hacia que Vagrant
+# fallara de inmediato con "undefined local variable" al leer este archivo.
+# Direcciones segun la tabla de direccionamiento de la topologia (VLAN10).
+# =============================================================================
+
+DHCP4_IP  = "192.168.10.30"
+DHCP4_IP6 = "fd00:10::30"
+
+DHCP6_IP  = "192.168.10.40"
+DHCP6_IP6 = "fd00:10::40"
+
+DNS1_IP   = "192.168.10.50"
+DNS1_IP6  = "fd00:10::50"
+
+DNS2_IP   = "192.168.10.60"
+DNS2_IP6  = "fd00:10::60"
+
+SMTP_IP   = "192.168.10.70"
+SMTP_IP6  = "fd00:10::70"
+
+NTP_IP    = "192.168.10.80"
+NTP_IP6   = "fd00:10::80"
+
+# ---- VLAN 20 (Clientes) - para el pool DHCP que reparte el servidor DHCP ----
+# NOTA: en el diagrama original el pool aparecia escrito como
+# "192.168.10.150 - 192.168.10.200" pegado a la VLAN de clientes, pero esa
+# es la subred de SERVIDORES (VLAN10), no la de CLIENTES (VLAN20). Se asume
+# que fue un error de rotulado en el diagrama y se usa el rango correcto
+# dentro de 192.168.20.0/24. Si en realidad querias ese rango literal,
+# avisame y lo cambio.
+CLIENTS_GATEWAY   = "192.168.20.1"
+CLIENTS_GATEWAY6  = "fd00:20::1"
+CLIENTS_NET6      = "fd00:20::/64"
+CLIENTS_POOL4     = "192.168.20.150 - 192.168.20.200"
+CLIENTS_POOL6     = "fd00:20::150 - fd00:20::200"
+
+# ---- Secreto TSIG compartido entre DNS1 y DNS2 para transferencias de zona ----
+# Generado una sola vez con: openssl rand -base64 32
+# IMPORTANTE: debe ser IDENTICO en ambos servidores (por eso vive aqui, en
+# una sola constante, y se inyecta a los dos).
+TSIG_SECRET = "nqF1rl+Hie0rt86wb78gLEqsGXd7POUpHk4BlsXNPfE="
+
 Vagrant.configure("2") do |config|
 
   # ===========================================================================
@@ -87,12 +131,42 @@ Vagrant.configure("2") do |config|
 
     dc.winrm.username = "vagrant"
     dc.winrm.password = "vagrant"
+    dc.winrm.transport = :ssl
+    dc.winrm.ssl_peer_verification = false
+    dc.winrm.port = 5986
 
     dc.vm.boot_timeout = 1800
 
     dc.winrm.timeout = 1800
     dc.winrm.retry_limit = 100
     dc.winrm.max_wait_time = 1800
+
+
+    # -------------------------------------------------------------------------
+    # NOTA: AllowUnencrypted en WinRM
+    #
+    # El box trae por defecto AllowUnencrypted = false, lo que impide que
+    # Vagrant se autentique por WinRM (transporte plaintext). Esto NO se
+    # puede arreglar de forma automatica desde el Vagrantfile: se necesita
+    # una sesion interactiva real dentro de Windows (VBoxManage guestcontrol
+    # corre en Sesion 0, sin escritorio interactivo, y ahi la elevacion UAC
+    # esta bloqueada por diseno del sistema operativo).
+    #
+    # SOLUCION APLICADA (una sola vez, ya hecha): se arranco la VM maestra
+    # (la que Vagrant usa como base para clonar) directamente desde
+    # VirtualBox, se inicio sesion como vagrant, se abrio PowerShell como
+    # Administrador y se corrio:
+    #
+    #   winrm set winrm/config/service '@{AllowUnencrypted="true"}'
+    #
+    # y se apago limpiamente la VM. Como los clones de windows-dc se crean
+    # a partir de esa maestra, todos los clones nuevos (incluso despues de
+    # "vagrant destroy") ya nacen con este ajuste aplicado.
+    #
+    # Si en el futuro se reimporta el box desde cero (nueva version, otra
+    # maquina, etc.), hay que repetir este paso una vez sobre la nueva
+    # maestra antes de usar "vagrant up".
+    # -------------------------------------------------------------------------
 
 
     # -------------------------------------------------------------------------
@@ -118,6 +192,8 @@ Vagrant.configure("2") do |config|
       vb.customize ["modifyvm", :id, "--vram", "32"]
       vb.customize ["modifyvm", :id, "--clipboard", "disabled"]
       vb.customize ["modifyvm", :id, "--draganddrop", "disabled"]
+      vb.customize ["modifyvm", :id, "--ioapic", "on"]
+      vb.customize ["modifyvm", :id, "--paravirtprovider", "default"]
 
     end
 
@@ -200,31 +276,200 @@ Vagrant.configure("2") do |config|
         "DOMAIN"  => DOMAIN
       }
 
+  end
 
-    # -------------------------------------------------------------------------
-    # DUAL-STACK IPv6 (OPCIONAL, NO SE EJECUTA SOLO)
-    #
-    # windows-dc.ps1 ya deshabilito IPv6 y ademas hace "exit 0" de inmediato
-    # si AD DS ya esta promovido, asi que agregar IPv6 ahi nunca se ejecutaria
-    # en un DC que ya funciona. Por eso va en un provisioner NUEVO e
-    # independiente, con run: "never" para que ni "vagrant up" ni
-    # "vagrant provision" lo disparen por accidente.
-    #
-    # Para aplicarlo (una sola vez, sobre el DC ya funcionando):
-    #   vagrant provision --provision-with ipv6-dc windows-dc
-    # -------------------------------------------------------------------------
+    # ---------------------------------------------------------------------------
+  # 3. Servidor DHCPv4 (Kea) - VLAN 10 (Servidores) -> 192.168.10.30
+  #    Atiende las solicitudes DHCP de la VLAN 20 (Clientes) vía DHCP relay
+  #    configurado en el router (ip helper-address 192.168.10.30).
+  # ---------------------------------------------------------------------------
+  config.vm.define "dhcpv4-server" do |d4|
+    d4.vm.box      = "ubuntu/jammy64"
+    d4.vm.hostname = "dhcpv4-server"
 
-    dc.vm.provision "ipv6-dc",
-      type: "shell",
-      run: "never",
-      path: "scripts/windows-dc-ipv6.ps1",
-      powershell_elevated_interactive: false,
+    d4.vm.network "public_network",
+      bridge: BRIDGE_INTERFACE.empty? ? nil : BRIDGE_INTERFACE,
+      auto_config: false
+
+    d4.vm.provider "virtualbox" do |vb|
+      vb.name   = "SIEM-DHCPv4-VLAN10"
+      vb.cpus   = 1
+      vb.memory = 512
+    end
+
+    d4.vm.provision "shell",
+      path: "scripts/dhcpv4-server.sh",
       env: {
-        "DC_IP6"   => DC_IP6,
-        "GATEWAY6" => GATEWAY6,
-        "DOMAIN"   => DOMAIN
+        "VM_IP"           => DHCP4_IP,
+        "VM_IP6"          => DHCP4_IP6,
+        "VM_GATEWAY"      => GATEWAY,
+        "VM_GATEWAY6"     => GATEWAY6,
+        "VM_DNS"          => DNS1_IP,
+        "VM_DNS2"         => DNS2_IP,
+        "SIEM_IP"         => SIEM_IP,
+        "DOMAIN"          => DOMAIN,
+        "CLIENTS_GATEWAY" => CLIENTS_GATEWAY,
+        "CLIENTS_POOL4"   => CLIENTS_POOL4
       }
+  end
 
+  # ---------------------------------------------------------------------------
+  # 4. Servidor DHCPv6 (Kea) - VLAN 10 (Servidores) -> 192.168.10.40
+  #    Atiende las solicitudes DHCPv6 de la VLAN 20 (Clientes) vía DHCP relay.
+  # ---------------------------------------------------------------------------
+  config.vm.define "dhcpv6-server" do |d6|
+    d6.vm.box      = "ubuntu/jammy64"
+    d6.vm.hostname = "dhcpv6-server"
+
+    d6.vm.network "public_network",
+      bridge: BRIDGE_INTERFACE.empty? ? nil : BRIDGE_INTERFACE,
+      auto_config: false
+
+    d6.vm.provider "virtualbox" do |vb|
+      vb.name   = "SIEM-DHCPv6-VLAN10"
+      vb.cpus   = 1
+      vb.memory = 512
+    end
+
+    d6.vm.provision "shell",
+      path: "scripts/dhcpv6-server.sh",
+      env: {
+        "VM_IP"            => DHCP6_IP,
+        "VM_IP6"           => DHCP6_IP6,
+        "VM_GATEWAY"       => GATEWAY,
+        "VM_GATEWAY6"      => GATEWAY6,
+        "VM_DNS6"          => DNS1_IP6,
+        "VM_DNS6_2"        => DNS2_IP6,
+        "SIEM_IP"          => SIEM_IP,
+        "DOMAIN"           => DOMAIN,
+        "CLIENTS_NET6"     => CLIENTS_NET6,
+        "CLIENTS_GATEWAY6" => CLIENTS_GATEWAY6,
+        "CLIENTS_POOL6"    => CLIENTS_POOL6
+      }
+  end
+
+  # ---------------------------------------------------------------------------
+  # 5. Servidor DNS1 - Primario/Maestro (BIND9) - VLAN 10 -> 192.168.10.50
+  # ---------------------------------------------------------------------------
+  config.vm.define "dns1-server" do |ns1|
+    ns1.vm.box      = "ubuntu/jammy64"
+    ns1.vm.hostname = "dns1-server"
+
+    ns1.vm.network "public_network",
+      bridge: BRIDGE_INTERFACE.empty? ? nil : BRIDGE_INTERFACE,
+      auto_config: false
+
+    ns1.vm.provider "virtualbox" do |vb|
+      vb.name   = "SIEM-DNS1-VLAN10"
+      vb.cpus   = 1
+      vb.memory = 512
+    end
+
+    ns1.vm.provision "shell",
+      path: "scripts/dns1-server.sh",
+      env: {
+        "VM_IP"       => DNS1_IP,
+        "VM_IP6"      => DNS1_IP6,
+        "VM_GATEWAY"  => GATEWAY,
+        "VM_GATEWAY6" => GATEWAY6,
+        "SIEM_IP"     => SIEM_IP,
+        "DOMAIN"      => DOMAIN,
+        "DNS2_IP"     => DNS2_IP,
+        "DNS2_IP6"    => DNS2_IP6,
+        "TSIG_SECRET" => TSIG_SECRET
+      }
+  end
+
+  # ---------------------------------------------------------------------------
+  # 6. Servidor DNS2 - Secundario/Esclavo (BIND9) - VLAN 10 -> 192.168.10.60
+  # ---------------------------------------------------------------------------
+  config.vm.define "dns2-server" do |ns2|
+    ns2.vm.box      = "ubuntu/jammy64"
+    ns2.vm.hostname = "dns2-server"
+
+    ns2.vm.network "public_network",
+      bridge: BRIDGE_INTERFACE.empty? ? nil : BRIDGE_INTERFACE,
+      auto_config: false
+
+    ns2.vm.provider "virtualbox" do |vb|
+      vb.name   = "SIEM-DNS2-VLAN10"
+      vb.cpus   = 1
+      vb.memory = 512
+    end
+
+    ns2.vm.provision "shell",
+      path: "scripts/dns2-server.sh",
+      env: {
+        "VM_IP"       => DNS2_IP,
+        "VM_IP6"      => DNS2_IP6,
+        "VM_GATEWAY"  => GATEWAY,
+        "VM_GATEWAY6" => GATEWAY6,
+        "SIEM_IP"     => SIEM_IP,
+        "DOMAIN"      => DOMAIN,
+        "DNS1_IP"     => DNS1_IP,
+        "DNS1_IP6"    => DNS1_IP6,
+        "TSIG_SECRET" => TSIG_SECRET
+      }
+  end
+
+  # ---------------------------------------------------------------------------
+  # 7. Servidor SMTP (Postfix + Dovecot) - VLAN 10 -> 192.168.10.70
+  # ---------------------------------------------------------------------------
+  config.vm.define "smtp-server" do |smtp|
+    smtp.vm.box      = "ubuntu/jammy64"
+    smtp.vm.hostname = "smtp-server"
+
+    smtp.vm.network "public_network",
+      bridge: BRIDGE_INTERFACE.empty? ? nil : BRIDGE_INTERFACE,
+      auto_config: false
+
+    smtp.vm.provider "virtualbox" do |vb|
+      vb.name   = "SIEM-SMTP-VLAN10"
+      vb.cpus   = 1
+      vb.memory = 768
+    end
+
+    smtp.vm.provision "shell",
+      path: "scripts/smtp-server.sh",
+      env: {
+        "VM_IP"       => SMTP_IP,
+        "VM_IP6"      => SMTP_IP6,
+        "VM_GATEWAY"  => GATEWAY,
+        "VM_GATEWAY6" => GATEWAY6,
+        "VM_DNS"      => DNS1_IP,
+        "SIEM_IP"     => SIEM_IP,
+        "DOMAIN"      => DOMAIN
+      }
+  end
+
+  # ---------------------------------------------------------------------------
+  # 8. Servidor NTP (chrony) - VLAN 10 -> 192.168.10.80
+  # ---------------------------------------------------------------------------
+  config.vm.define "ntp-server" do |ntp|
+    ntp.vm.box      = "ubuntu/jammy64"
+    ntp.vm.hostname = "ntp-server"
+
+    ntp.vm.network "public_network",
+      bridge: BRIDGE_INTERFACE.empty? ? nil : BRIDGE_INTERFACE,
+      auto_config: false
+
+    ntp.vm.provider "virtualbox" do |vb|
+      vb.name   = "SIEM-NTP-VLAN10"
+      vb.cpus   = 1
+      vb.memory = 512
+    end
+
+    ntp.vm.provision "shell",
+      path: "scripts/ntp-server.sh",
+      env: {
+        "VM_IP"       => NTP_IP,
+        "VM_IP6"      => NTP_IP6,
+        "VM_GATEWAY"  => GATEWAY,
+        "VM_GATEWAY6" => GATEWAY6,
+        "VM_DNS"      => DNS1_IP,
+        "SIEM_IP"     => SIEM_IP,
+        "DOMAIN"      => DOMAIN
+      }
   end
 
 end
