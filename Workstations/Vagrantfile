@@ -113,8 +113,7 @@ Vagrant.configure("2") do |config|
   # ================================================================
   config.vm.define "win10-02" do |wins2|
     wins2.vm.box = "gusztavvargadr/windows-10"
-    wins2.vm.box_check_update = false
-    wins2.vm.hostname = "win10-02"
+    #wins2.vm.hostname = "win10-02"
     wins2.vm.communicator = "winrm"
 
     wins2.vm.network "public_network",
@@ -156,25 +155,26 @@ Vagrant.configure("2") do |config|
   # MÁQUINA 3 — linux-01 | IP: 192.168.20.40
   # ================================================================
   config.vm.define "linux-01" do |lx1|
-    # Box con escritorio preinstalado para evitar instalación larga.
-    # Alternativa sin escritorio: "ubuntu/jammy64" (el script lo instala).
-    lx1.vm.box = "lxdware/ubuntu-desktop-22-04"
+    lx1.vm.box = "ubuntu/jammy64"
     lx1.vm.box_check_update = false
     lx1.vm.hostname = "linux-01"
     lx1.vm.communicator = "ssh"
+    lx1.vm.boot_timeout = 600
 
     lx1.vm.network "public_network",
       bridge: BRIDGE_IFACE.empty? ? nil : BRIDGE_IFACE,
       auto_config: false
 
     lx1.vm.provider "virtualbox" do |vb|
+      vb.gui    = true
       vb.name   = "SIEM_linux-01"
       vb.memory = 2048
       vb.cpus   = 2
-      vb.customize ["modifyvm", :id, "--vram", "128"]
-      vb.customize ["modifyvm", :id, "--audio", "none"]
-      # Habilitar aceleración 3D para mejor rendimiento del escritorio
-      vb.customize ["modifyvm", :id, "--accelerate3d", "on"]
+      # Usar NIC e1000 nativo para evitar bloqueo en renaming eth1 -> enp0s8
+      vb.customize ["modifyvm", :id, "--nictype1", "82540EM"]
+      vb.customize ["modifyvm", :id, "--nictype2", "82540EM"]
+      # Ajustar framebuffer para evitar que el Kernel se cuelgue en la consola de video
+      vb.customize ["modifyvm", :id, "--graphicscontroller", "vboxvga"]
     end
 
     lx1.vm.provision "shell",
@@ -186,43 +186,46 @@ Vagrant.configure("2") do |config|
         "VM_GW"            => GW_IP,
         "VM_DNS"           => DC_IP,
         "WAZUH_MANAGER_IP" => WAZUH_MANAGER_IP,
-        "INSTALL_DESKTOP"  => "false"   # Cambiar a "true" si usas ubuntu/jammy64
+        "INSTALL_DESKTOP"  => "true"
       }
   end
 
   # ================================================================
-  # MÁQUINA 4 — linux-02 | IP: 192.168.20.41
-  # ================================================================
+# MÁQUINA 4 — linux-02 | IP: 192.168.20.41
+# ================================================================
   config.vm.define "linux-02" do |lx2|
-    lx2.vm.box = "lxdware/ubuntu-desktop-22-04"
-    lx2.vm.box_check_update = false
-    lx2.vm.hostname = "linux-02"
-    lx2.vm.communicator = "ssh"
+  lx2.vm.box = "ubuntu/jammy64"
+  lx2.vm.box_check_update = false
+  lx2.vm.hostname = "linux-02"
+  lx2.vm.communicator = "ssh"
+  lx2.vm.boot_timeout = 600
 
-    lx2.vm.network "public_network",
-      bridge: BRIDGE_IFACE.empty? ? nil : BRIDGE_IFACE,
-      auto_config: false
+  lx2.vm.network "public_network",
+    bridge: BRIDGE_IFACE.empty? ? nil : BRIDGE_IFACE,
+    auto_config: false
 
-    lx2.vm.provider "virtualbox" do |vb|
-      vb.name   = "SIEM_linux-02"
-      vb.memory = 2048
-      vb.cpus   = 2
-      vb.customize ["modifyvm", :id, "--vram", "128"]
-      vb.customize ["modifyvm", :id, "--audio", "none"]
-      vb.customize ["modifyvm", :id, "--accelerate3d", "on"]
-    end
+  lx2.vm.provider "virtualbox" do |vb|
+    vb.gui    = true
+    vb.name   = "SIEM_linux-02"
+    vb.memory = 2048
+    vb.cpus   = 2
+    # Ajustes clave para desbloquear el arranque del Kernel y SSH
+    vb.customize ["modifyvm", :id, "--nictype1", "82540EM"]
+    vb.customize ["modifyvm", :id, "--nictype2", "82540EM"]
+    vb.customize ["modifyvm", :id, "--graphicscontroller", "vboxvga"]
+  end
 
-    lx2.vm.provision "shell",
-      path:       "scripts/linux-desktop.sh",
-      privileged: true,
-      env: {
-        "VM_IP"            => "192.168.20.41",
-        "VM_HOSTNAME"      => "linux-02",
-        "VM_GW"            => GW_IP,
-        "VM_DNS"           => DC_IP,
-        "WAZUH_MANAGER_IP" => WAZUH_MANAGER_IP,
-        "INSTALL_DESKTOP"  => "false"
-      }
+  lx2.vm.provision "shell",
+    path:       "scripts/linux-desktop.sh",
+    privileged: true,
+    env: {
+      "VM_IP"            => "192.168.20.41",
+      "VM_HOSTNAME"      => "linux-02",
+      "VM_GW"            => GW_IP,
+      "VM_DNS"           => DC_IP,
+      "WAZUH_MANAGER_IP" => WAZUH_MANAGER_IP,
+      "INSTALL_DESKTOP"  => "true"
+    }
   end
 
 end

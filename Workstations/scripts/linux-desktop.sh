@@ -69,9 +69,37 @@ if ! grep -q "empresa.local" /etc/hosts; then
 fi
 
 # ============================================================
-# 3. CONFIGURAR IP ESTÁTICA CON NETPLAN
+# 3. INSTALAR ENTORNO DE ESCRITORIO (OPCIONAL)
 # ============================================================
-log "[3/7] Configurando IP estática con Netplan..."
+log "[3/7] Verificando entorno de escritorio (INSTALL_DESKTOP=$INSTALL_DESKTOP)..."
+
+if [ "$INSTALL_DESKTOP" = "true" ]; then
+    if dpkg -l ubuntu-desktop-minimal > /dev/null 2>&1 || \
+       dpkg -l xubuntu-desktop     > /dev/null 2>&1; then
+        log "   Entorno de escritorio ya instalado."
+    else
+        log "   Instalando xubuntu-desktop (más liviano que GNOME)..."
+        log "   ADVERTENCIA: Este proceso puede tardar 15-30 minutos según la conexión."
+        apt-get install -y --no-install-recommends xubuntu-desktop lightdm \
+            > /dev/null 2>&1 || apt-get install -y ubuntu-desktop-minimal > /dev/null 2>&1
+        # Configurar LightDM como gestor de pantalla predeterminado
+        systemctl enable lightdm 2>/dev/null || true
+        log "   Escritorio instalado."
+    fi
+
+    # Instalar Firefox si no está presente
+    if ! command -v firefox > /dev/null 2>&1; then
+        log "   Instalando Firefox..."
+        snap install firefox 2>/dev/null || apt-get install -y firefox > /dev/null 2>&1 || true
+    fi
+else
+    log "   Saltando instalación de escritorio (box ya incluye GUI)."
+fi
+
+# ============================================================
+# 4. CONFIGURAR IP ESTÁTICA CON NETPLAN
+# ============================================================
+log "[4/7] Configurando IP estática con Netplan..."
 
 # Detectar la interfaz de red correcta (excluir loopback y la NAT de Vagrant)
 NET_IFACE=$(ip -o link show | awk -F': ' '$2 !~ /^lo$|^docker|^veth|^br-/{print $2}' | \
@@ -97,7 +125,6 @@ log "   Interfaz seleccionada: $NET_IFACE"
 # Crear o sobreescribir configuración de Netplan
 NETPLAN_FILE="/etc/netplan/99-vagrant-static.yaml"
 cat > "$NETPLAN_FILE" << NETPLAN_EOF
-# Configuración generada por Vagrant — Integrante C VLAN 20
 network:
   version: 2
   renderer: networkd
@@ -107,9 +134,6 @@ network:
       dhcp6: false
       addresses:
         - ${VM_IP}/24
-      routes:
-        - to: default
-          via: ${VM_GW}
       nameservers:
         addresses:
           - ${VM_DNS}
@@ -132,34 +156,6 @@ if ping -c 2 -W 3 "$VM_GW" > /dev/null 2>&1; then
     log "   Gateway $VM_GW alcanzable."
 else
     warn "No se puede alcanzar el gateway $VM_GW. Verifica la conexión puente."
-fi
-
-# ============================================================
-# 4. INSTALAR ENTORNO DE ESCRITORIO (OPCIONAL)
-# ============================================================
-log "[4/7] Verificando entorno de escritorio (INSTALL_DESKTOP=$INSTALL_DESKTOP)..."
-
-if [ "$INSTALL_DESKTOP" = "true" ]; then
-    if dpkg -l ubuntu-desktop-minimal > /dev/null 2>&1 || \
-       dpkg -l xubuntu-desktop     > /dev/null 2>&1; then
-        log "   Entorno de escritorio ya instalado."
-    else
-        log "   Instalando xubuntu-desktop (más liviano que GNOME)..."
-        log "   ADVERTENCIA: Este proceso puede tardar 15-30 minutos según la conexión."
-        apt-get install -y --no-install-recommends xubuntu-desktop lightdm \
-            > /dev/null 2>&1 || apt-get install -y ubuntu-desktop-minimal > /dev/null 2>&1
-        # Configurar LightDM como gestor de pantalla predeterminado
-        systemctl enable lightdm 2>/dev/null || true
-        log "   Escritorio instalado."
-    fi
-
-    # Instalar Firefox si no está presente
-    if ! command -v firefox > /dev/null 2>&1; then
-        log "   Instalando Firefox..."
-        snap install firefox 2>/dev/null || apt-get install -y firefox > /dev/null 2>&1 || true
-    fi
-else
-    log "   Saltando instalación de escritorio (box ya incluye GUI)."
 fi
 
 # ============================================================
@@ -210,10 +206,10 @@ else
 
     # Habilitar e iniciar el servicio
     systemctl daemon-reload
-    systemctl enable wazuh-agent
-    systemctl start wazuh-agent
+    systemctl enable wazuh-agent || true
+    systemctl start wazuh-agent || true
 
-    log "   Agente Wazuh instalado e iniciado."
+    log "   Agente Wazuh instalado."
 fi
 
 # Verificar estado del servicio

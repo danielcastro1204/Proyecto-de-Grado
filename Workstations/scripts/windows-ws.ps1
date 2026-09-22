@@ -1,12 +1,12 @@
 # =============================================================================
-# windows-ws.ps1 — FASE 1: Configuración de red, hostname y unión al dominio
+# windows-ws.ps1 ??" FASE 1: Configuraci??n de red, hostname y uni??n al dominio
 # =============================================================================
 # Variables de entorno esperadas (inyectadas por Vagrant):
-#   VM_IP             - IP estática de la máquina (ej: 192.168.20.30)
+#   VM_IP             - IP est??tica de la m??quina (ej: 192.168.20.30)
 #   VM_HOSTNAME       - Nombre del equipo (ej: win10-01)
 #   VM_GW             - Gateway (192.168.20.1)
 #   VM_DNS            - DNS / IP del DC (192.168.10.20)
-#   DOMAIN_ADMIN_PASS - Contraseña del Admin del dominio
+#   DOMAIN_ADMIN_PASS - Contrase??a del Admin del dominio
 #   WAZUH_MANAGER_IP  - IP del manager Wazuh (192.168.30.10)
 # =============================================================================
 
@@ -23,16 +23,18 @@ $WAZUH_MANAGER_IP = $env:WAZUH_MANAGER_IP
 $DOMAIN_NAME      = "empresa.local"
 $DOMAIN_ADMIN     = "Administrator"
 
+$msgHeader = " FASE 1 | " + $env:VM_HOSTNAME + " | IP: " + $env:VM_IP
 Write-Host "============================================================"
-Write-Host " FASE 1 | $VM_HOSTNAME | IP: $VM_IP"
+Write-Host $msgHeader
 Write-Host "============================================================"
 
+New-NetFirewallRule -DisplayName "WinRM-Vagrant-AnyProfile" -Direction Inbound -Protocol TCP -LocalPort 5985,5986 -Action Allow -Profile Any -ErrorAction SilentlyContinue | Out-Null
 # ============================================================
-# 1. CONFIGURAR IP ESTÁTICA
+# 1. CONFIGURAR IP EST??TICA
 # ============================================================
-Write-Host "[1/5] Configurando IP estática $VM_IP en la interfaz puente..."
+Write-Host "[1/5] Configurando IP est??tica $VM_IP en la interfaz puente..."
 
-# Identificar el adaptador de red correcto (el que NO tiene IP 10.x — evitar NAT de Vagrant)
+# Identificar el adaptador de red correcto (el que NO tiene IP 10.x ??" evitar NAT de Vagrant)
 $adapter = Get-NetAdapter | Where-Object {
     $_.Status -eq 'Up' -and $_.Name -notmatch 'Loopback'
 } | Where-Object {
@@ -86,9 +88,9 @@ if ($currentName -ne $VM_HOSTNAME) {
 }
 
 # ============================================================
-# 3. HABILITAR AUDITORÍA DE SEGURIDAD AVANZADA
+# 3. HABILITAR AUDITOR??A DE SEGURIDAD AVANZADA
 # ============================================================
-Write-Host "[3/5] Habilitando auditoría de seguridad avanzada..."
+Write-Host "[3/5] Habilitando auditor??a de seguridad avanzada..."
 
 $auditCategories = @(
     "Account Logon",
@@ -103,7 +105,7 @@ $auditCategories = @(
 foreach ($cat in $auditCategories) {
     auditpol /set /category:"$cat" /success:enable /failure:enable 2>$null
 }
-Write-Host "   Auditoría configurada."
+Write-Host "   Auditor??a configurada."
 
 # ============================================================
 # 4. CONFIGURAR FIREWALL (reglas para agentes SIEM y dominio)
@@ -141,11 +143,11 @@ foreach ($rule in $fwRules) {
 # ============================================================
 # 5. UNIRSE AL DOMINIO empresa.local
 # ============================================================
-Write-Host "[5/5] Verificando membresía al dominio '$DOMAIN_NAME'..."
+Write-Host "[5/5] Verificando membres??a al dominio '$DOMAIN_NAME'..."
 
 $computerInfo = Get-WmiObject Win32_ComputerSystem
 if ($computerInfo.PartOfDomain -and $computerInfo.Domain -eq $DOMAIN_NAME) {
-    Write-Host "   La máquina ya pertenece al dominio '$DOMAIN_NAME'. Saltando unión."
+    Write-Host "   La m??quina ya pertenece al dominio '$DOMAIN_NAME'. Saltando uni??n."
 } else {
     Write-Host "   Uniendo al dominio '$DOMAIN_NAME' con credenciales de $DOMAIN_ADMIN..."
 
@@ -153,8 +155,8 @@ if ($computerInfo.PartOfDomain -and $computerInfo.Domain -eq $DOMAIN_NAME) {
     $pingResult = Test-Connection -ComputerName $VM_DNS -Count 2 -Quiet
     if (-not $pingResult) {
         Write-Warning "ADVERTENCIA: No se puede alcanzar el DC en $VM_DNS."
-        Write-Warning "Asegúrate de que el equipo del Integrante B esté encendido y operativo."
-        Write-Warning "El aprovisionamiento continuará pero la unión al dominio puede fallar."
+        Write-Warning "Aseg??rate de que el equipo del Integrante B est?? encendido y operativo."
+        Write-Warning "El aprovisionamiento continuar?? pero la uni??n al dominio puede fallar."
     }
 
     $securePass = ConvertTo-SecureString $DOMAIN_ADMIN_PASS -AsPlainText -Force
@@ -170,19 +172,20 @@ if ($computerInfo.PartOfDomain -and $computerInfo.Domain -eq $DOMAIN_NAME) {
             -OUPath       "OU=Computers,DC=empresa,DC=local" `
             -Force `
             -ErrorAction  Stop
-        Write-Host "   ¡Unión al dominio exitosa! Se reiniciará para aplicar cambios."
+        Write-Host "   ??Uni??n al dominio exitosa! Se reiniciar?? para aplicar cambios."
     } catch {
-        Write-Warning "No se pudo unir con OU personalizada. Intentando unión estándar..."
+        Write-Warning "No se pudo unir con OU personalizada. Intentando uni??n est??ndar..."
         Add-Computer `
             -DomainName  $DOMAIN_NAME `
             -Credential  $credential `
             -Force
-        Write-Host "   Unión al dominio completada (OU estándar)."
+        Write-Host "   Uni??n al dominio completada (OU est??ndar)."
     }
 }
 
 Write-Host ""
 Write-Host "============================================================"
-Write-Host " FASE 1 COMPLETADA — El sistema se reiniciará ahora."
-Write-Host " Vagrant continuará automáticamente con la FASE 2."
+Write-Host " FASE 1 COMPLETADA ??" El sistema se reiniciar?? ahora."
+Write-Host " Vagrant continuar?? autom??ticamente con la FASE 2."
 Write-Host "============================================================"
+"
