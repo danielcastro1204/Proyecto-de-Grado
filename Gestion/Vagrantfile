@@ -5,9 +5,10 @@
 # Vagrantfile - Integrante A (ASUS TUF Gaming A15)
 # Proyecto de Grado - Laboratorio de Ciberseguridad VLAN 30 (Gestión)
 #
-# Levanta dos VMs:
-#   - wazuh  : Servidor SIEM Wazuh all-in-one (Ubuntu Server 22.04) → 192.168.30.10
+# Levanta tres VMs:
+#   - wazuh1 : Servidor SIEM Wazuh all-in-one (Ubuntu Server 22.04) → 192.168.30.10
 #   - kali   : Estación atacante Kali Linux rolling              → 192.168.30.20
+#   - pfsense: Firewall / fuente de logs para el SIEM             → 192.168.30.30
 #
 # REQUISITO: Ajusta BRIDGE_INTERFACE con el nombre exacto de tu NIC física
 #            (la que conecta el portátil al Switch 2).  Ejecuta `ip link` o
@@ -16,36 +17,37 @@
 #              Windows → "Intel(R) Wi-Fi 6 AX200 160MHz", "Realtek PCIe GbE..."
 # =============================================================================
 
-BRIDGE_INTERFACE = ""   # <-- CAMBIA ESTO según tu sistema operativo/NIC
+BRIDGE_INTERFACE = ""
 
 Vagrant.configure("2") do |config|
 
   # ---------------------------------------------------------------------------
   # VM 1: Servidor SIEM Wazuh
   # ---------------------------------------------------------------------------
-  config.vm.define "wazuh" do |wazuh|
-    wazuh.vm.box      = "ubuntu/jammy64"
-    wazuh.vm.hostname = "wazuh-server"
+  config.vm.define "wazuh1" do |wazuh1|
+    wazuh1.vm.box      = "ubuntu/jammy64"
+    wazuh1.vm.hostname = "wazuh-server"
 
     # Red en modo puente — la IP fija se asigna desde el script de aprovisionamiento
     # auto_config: false → Vagrant no intenta DHCP; el script configura la IP estática
-    wazuh.vm.network "public_network",
+    wazuh1.vm.network "public_network",
       bridge:      BRIDGE_INTERFACE.empty? ? nil : BRIDGE_INTERFACE,
       auto_config: false
 
-    wazuh.vm.provider "virtualbox" do |vb|
+    wazuh1.vm.provider "virtualbox" do |vb|
       vb.name   = "SIEM-Wazuh-VLAN30"
-      vb.memory = 4096   # 4 GB RAM
-      vb.cpus   = 2
+      vb.memory = 8192   # 8 GB RAM (4GB se queda corto para indexer+manager+dashboard juntos)
+      vb.cpus   = 4      # más CPU reduce el riesgo de timeout al arrancar wazuh-manager
       # Habilitar PAE/NX y nested virtualization si está disponible
       vb.customize ["modifyvm", :id, "--ioapic", "on"]
-      vb.customize ["modifyvm", :id, "--nictype1", "82545EM"]
+      # NO reactivar --nictype1 82545EM: causa cuelgues/timeouts de SSH con
+      # Ubuntu 22.04 en VirtualBox (bug conocido). Dejar el default o usar virtio.
       # Ampliar disco de vídeo (no crítico, evita warnings)
       vb.customize ["modifyvm", :id, "--vram", "16"]
     end
 
     # Script de aprovisionamiento
-    wazuh.vm.provision "shell",
+    wazuh1.vm.provision "shell",
       path:       "scripts/wazuh-server.sh",
       privileged: true
   end
@@ -74,6 +76,54 @@ Vagrant.configure("2") do |config|
     kali.vm.provision "shell",
       path:       "scripts/kali-attacker.sh",
       privileged: true
+  end
+
+  # ---------------------------------------------------------------------------
+  # VM 3: pfSense (firewall / fuente de logs para el SIEM)
+  # ---------------------------------------------------------------------------
+  # NOTA IMPORTANTE: pfSense no es una distro Linux estándar (es FreeBSD),
+  # así que no existe una caja oficial de Vagrant mantenida por el proyecto
+  # pfSense. Usamos la caja de comunidad "ksklareski/pfsense-ce". Esto trae
+  # dos particularidades frente a wazuh/kali:
+  #   1. SSH es por usuario/contraseña (vagrant/vagrant), no por llave.
+  #   2. La PRIMERA vez que arranca, pfSense pide confirmar por consola
+  #      (ventana de VirtualBox) cuál interfaz es WAN y cuál es LAN — esto
+  #      es el instalador estándar de pfSense, no un error. Ver guía aparte.
+  config.vm.define "pfsense" do |pfsense|
+    pfsense.vm.box   = "ksklareski/pfsense-ce"
+    pfsense.vm.guest = :freebsd
+
+    # pfSense no soporta carpetas compartidas de Vagrant
+    pfsense.vm.synced_folder ".", "/vagrant", disabled: true
+
+    # Autenticación de la caja de comunidad (no usa llave SSH)
+    pfsense.ssh.username    = "vagrant"
+    pfsense.ssh.password    = "vagrant"
+    pfsense.ssh.insert_key  = false
+    pfsense.ssh.shell       = "sh"
+
+    # Red en modo puente hacia la VLAN 30, igual que wazuh y kali.
+    # auto_config: false porque la IP se asigna con el script pfsense-config.sh
+    pfsense.vm.network "public_network",
+      bridge:      BRIDGE_INTERFACE.empty? ? nil : BRIDGE_INTERFACE,
+      auto_config: false
+
+    # Puerto SSH explícito: 2222 ya lo usa wazuh1, así que forzamos 2223
+    # para evitar el choque de puertos al levantar varias VMs a la vez.
+    pfsense.vm.network "forwarded_port", guest: 22, host: 2223, auto_correct: true, id: "ssh"
+
+    pfsense.vm.provider "virtualbox" do |vb|
+      vb.name   = "pfSense-VLAN30"
+      vb.memory = 1024
+      vb.cpus   = 1
+      vb.customize ["modifyvm", :id, "--ioapic", "on"]
+    end
+
+    # privileged: false porque esta caja no tiene "sudo"; el usuario vagrant
+    # ya tiene los permisos necesarios para ejecutar pfSsh.php
+    pfsense.vm.provision "shell",
+      path:       "scripts/pfsense-config.sh",
+      privileged: false
   end
 
 end

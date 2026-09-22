@@ -28,7 +28,7 @@ DNS="${GATEWAY}"
 IFACE="enp0s8"          # Segunda NIC de VirtualBox (la puente); la primera (enp0s3) es NAT de Vagrant
 
 # ── Versión de Wazuh ─────────────────────────────────────────────────────────
-WAZUH_VERSION="4.x"
+WAZUH_VERSION="4.14"
 WAZUH_PASSWORDS_FILE="/root/wazuh_passwords.txt"
 
 # =============================================================================
@@ -53,8 +53,18 @@ network:
       dhcp4: false
       addresses:
         - ${STATIC_IP}/${PREFIX}
+      # Sin ruta por defecto aquí: dejamos que el tráfico a internet siga
+      # saliendo por la NAT de Vagrant (enp0s3). Esta interfaz solo necesita
+      # la IP fija para hablar dentro de la VLAN 30.
+      #
+      # SÍ agregamos rutas específicas (no 0.0.0.0/0) hacia las otras VLANs
+      # del laboratorio a través del router Cisco (192.168.30.1). Esto es
+      # seguro porque solo aplica a esas dos subredes puntuales; el resto
+      # del tráfico (incluido internet) sigue usando la NAT.
       routes:
-        - to: 0.0.0.0/0
+        - to: 192.168.10.0/24
+          via: ${GATEWAY}
+        - to: 192.168.20.0/24
           via: ${GATEWAY}
       nameservers:
         addresses:
@@ -98,6 +108,19 @@ install_wazuh() {
     warning "Wazuh Dashboard ya existe. Omitiendo instalación."
     return 0
   fi
+
+  # Evitar que systemd mate a wazuh-manager por timeout durante el primer
+  # arranque (con poca CPU/RAM disponible, el arranque completo de todos
+  # los daemons puede tardar más que el TimeoutStartSec por defecto).
+  # Se crea el drop-in ANTES de instalar el paquete: systemd lo mezcla con
+  # la unidad en cuanto esta se registre, sin necesitar pasos extra.
+  info "Configurando timeout extendido para el arranque de wazuh-manager..."
+  mkdir -p /etc/systemd/system/wazuh-manager.service.d
+  cat > /etc/systemd/system/wazuh-manager.service.d/override.conf <<'OVERRIDEEOF'
+[Service]
+TimeoutStartSec=300
+OVERRIDEEOF
+  systemctl daemon-reload
 
   info "=========================================="
   info "  Iniciando instalación Wazuh all-in-one  "
