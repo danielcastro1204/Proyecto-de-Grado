@@ -1,4 +1,4 @@
-# =============================================================================
+﻿# =============================================================================
 # escenario1_trafico_windows.ps1 — Tráfico normal (línea base) para Windows
 # Equivalente de escenario1_linea_base.sh, para win10-01 / win10-02.
 # Duración fija de 30 minutos (ajustar $DuracionMin si hace falta).

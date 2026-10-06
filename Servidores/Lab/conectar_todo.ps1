@@ -1,4 +1,4 @@
-# =============================================================================
+﻿# =============================================================================
 # conectar_todo.ps1 — UN SOLO COMANDO para conectar TODOS los servidores
 # de esta carpeta (Servidores) al SIEM, corrigiendo de paso el problema de
 # la ruta por defecto NAT en cada uno.

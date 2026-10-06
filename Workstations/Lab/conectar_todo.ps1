@@ -1,4 +1,4 @@
-# =============================================================================
+﻿# =============================================================================
 # conectar_todo.ps1 — UN SOLO COMANDO para conectar TODAS las estaciones
 # de trabajo de esta carpeta (Workstations) al SIEM, corrigiendo de paso
 # el problema de la ruta por defecto NAT en cada una.

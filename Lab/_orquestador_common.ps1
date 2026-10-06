@@ -1,4 +1,4 @@
-# =============================================================================
+﻿# =============================================================================
 # _orquestador_common.ps1
 # Funciones compartidas por los orquestadores de cada carpeta (Gestion,
 # Servidores, Workstations). No se ejecuta solo: se importa con "dot-sourcing"
@@ -111,7 +111,7 @@ function Wait-AndShowJobs {
     Write-Host "  RESUMEN" -ForegroundColor Cyan
     Write-Host "============================================================" -ForegroundColor Cyan
     foreach ($j in $Jobs) {
-        $status = if ($j.State -eq "Completed") { "✓ OK" } else { "✗ $($j.State)" }
+        $status = if ($j.State -eq "Completed") { "[OK]" } else { "[FAIL] $($j.State)" }
         $color = if ($j.State -eq "Completed") { "Green" } else { "Red" }
         Write-Host ("  {0,-20} {1}" -f $j.Name, $status) -ForegroundColor $color
     }

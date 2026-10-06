@@ -1,4 +1,4 @@
-# =============================================================================
+﻿# =============================================================================
 # ejecutar_trafico.ps1 — UN SOLO COMANDO para generar tráfico normal
 # (Escenario 1 - línea base) EN PARALELO en todas las VMs de Servidores
 # que pueden generar tráfico de cliente (no tiene sentido correrlo en el

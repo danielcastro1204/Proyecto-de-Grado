@@ -1,4 +1,4 @@
-# =============================================================================
+﻿# =============================================================================
 # ejecutar_ataques.ps1 — UN SOLO COMANDO para lanzar el Escenario 2
 # (los 3 ataques automatizados corriendo EN PARALELO dentro de Kali) y traer
 # de vuelta el CSV resultante a este host, listo para el análisis.

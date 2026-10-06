@@ -1,4 +1,4 @@
-# =============================================================================
+﻿# =============================================================================
 # conectar_todo.ps1 — Corrige la red de Kali (y de paso le instala/conecta
 # un agente Wazuh, útil para ver en el SIEM qué pasa en la propia máquina
 # atacante) y deja el SIEM listo para recibir agentes.

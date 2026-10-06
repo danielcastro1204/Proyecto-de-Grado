@@ -1,4 +1,4 @@
-# =============================================================================
+﻿# =============================================================================
 # ejecutar_trafico.ps1 — UN SOLO COMANDO para generar tráfico normal
 # (Escenario 1 - línea base) EN PARALELO en las 4 estaciones de trabajo
 # (win10-01, win10-02, linux-01, linux-02).
