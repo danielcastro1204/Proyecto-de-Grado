@@ -61,7 +61,7 @@
     <group>firewall,</group>
   </rule>
 
-  <rule id="100022" level="9" frequency="6" timeframe="600">
+  <rule id="100022" level="9" frequency="4" timeframe="600">
     <if_matched_sid>100003</if_matched_sid>
     <same_source_ip />
     <description>Posible escaneo de puertos sigiloso (low-and-slow): multiples conexiones a puertos distintos desde el mismo origen en 10 min (T1046)</description>
