@@ -1,0 +1,174 @@
+<!--
+  local_rules.xml — Reglas de correlacion personalizadas para el proyecto SIEM
+  Mapeadas a MITRE ATT&CK segun los 5 ataques definidos en la metodologia:
+    T1110 Fuerza bruta SSH | T1046 Escaneo de puertos | T1550.002 Pass-the-Hash
+    T1190 Inyeccion SQL    | T1203/T1059 Ejecucion de payload malicioso
+  Colocar en: /var/ossec/etc/rules/local_rules.xml del Wazuh Manager
+  Reiniciar despues: systemctl restart wazuh-manager
+-->
+<group name="local,proyecto_siem,">
+
+  <!-- ============ 1. FUERZA BRUTA SSH (T1110.001) ============ -->
+  <rule id="100010" level="10" frequency="5" timeframe="120">
+    <if_matched_sid>5716</if_matched_sid>
+    <same_source_ip />
+    <description>Fuerza bruta SSH detectada: 5 intentos fallidos en 120s desde la misma IP (T1110.001)</description>
+    <mitre>
+      <id>T1110.001</id>
+    </mitre>
+    <group>attack,bruteforce,ssh,</group>
+  </rule>
+
+  <rule id="100011" level="12" frequency="3" timeframe="60">
+    <if_matched_sid>100010</if_matched_sid>
+    <description>Fuerza bruta SSH critica: patron sostenido de intentos fallidos (T1110.001)</description>
+    <mitre><id>T1110.001</id></mitre>
+    <group>attack,bruteforce,ssh,</group>
+  </rule>
+
+  <!-- ============ 2. ESCANEO DE PUERTOS (T1046) ============ -->
+  <!-- Requiere decoder/regla de Suricata reenviada via agente (ver local_decoder.xml) -->
+  <rule id="100020" level="8">
+    <if_sid>86601</if_sid>
+    <field name="alert.signature">(?i)nmap|portscan|port scan|Scan</field>
+    <description>Escaneo de puertos detectado por Suricata (T1046)</description>
+    <mitre><id>T1046</id></mitre>
+    <group>attack,recon,scan,</group>
+  </rule>
+
+  <rule id="100021" level="10" frequency="10" timeframe="60">
+    <if_matched_sid>100020</if_matched_sid>
+    <same_source_ip />
+    <description>Escaneo de puertos intensivo: multiples alertas de escaneo en 60s (T1046)</description>
+    <mitre><id>T1046</id></mitre>
+    <group>attack,recon,scan,</group>
+  </rule>
+
+  <!-- TUNING: deteccion de escaneo SIGILOSO ("low and slow") que evade la firma
+       de Suricata (regla 86601) por su timing lento (-T1), fragmentacion y
+       senuelos. Se detecta a nivel de firewall: muchas conexiones nuevas desde
+       un mismo origen hacia puertos distintos en una ventana LARGA (10 min),
+       umbral bajo. Requiere que fw-gateway reenvie el log de conexiones nuevas
+       de nftables (ver fw-gateway.sh). -->
+  <!-- El decoder nativo de Wazuh (netfilter) ya decodifica los logs del firewall
+       perimetral (FW-NEW-CONN/FW-SYN) y extrae srcip/dstport, pero su regla base
+       4100 es de NIVEL 0 y no se contabiliza de forma fiable en la correlacion
+       por frecuencia. Esta regla intermedia la reclasifica a nivel 2 (no genera
+       alarma por si sola) para que la correlacion de escaneo sigiloso la cuente. -->
+  <rule id="100003" level="2">
+    <if_sid>4100</if_sid>
+    <description>Conexion nueva registrada por el firewall perimetral (base para correlacion)</description>
+    <group>firewall,</group>
+  </rule>
+
+  <rule id="100022" level="9" frequency="6" timeframe="600">
+    <if_matched_sid>100003</if_matched_sid>
+    <same_source_ip />
+    <description>Posible escaneo de puertos sigiloso (low-and-slow): multiples conexiones a puertos distintos desde el mismo origen en 10 min (T1046)</description>
+    <mitre><id>T1046</id></mitre>
+    <group>attack,recon,scan,</group>
+  </rule>
+
+  <!-- ============ 3. PASS-THE-HASH / MOVIMIENTO LATERAL (T1550.002 / T1021) ============ -->
+  <!-- TUNING: la version anterior (nivel 12, grupo attack) disparaba sobre
+       CUALQUIER logon NTLM tipo 3, incluida la autenticacion de red LEGITIMA
+       del dominio (acceso SMB, GPO, etc.), generando muchos falsos positivos y
+       alimentando en cascada la correlacion 100099. Se degrada a INFORMATIVA
+       (nivel 3, fuera del grupo 'attack' y de 'authentication_success' para no
+       contar como alarma accionable). La deteccion real de PtH pasa a 100032. -->
+  <rule id="100030" level="3">
+    <if_group>windows</if_group>
+    <field name="win.system.eventID">4624</field>
+    <field name="win.eventdata.logonType">3</field>
+    <field name="win.eventdata.authenticationPackageName">NTLM</field>
+    <description>Logon de red NTLM tipo 3 (informativo; linea base de autenticacion)</description>
+    <group>ntlm_logon,informativo,</group>
+  </rule>
+
+  <!-- TUNING (iteracion 2): la deteccion de PtH basada en el ORIGEN de red
+       (logon NTLM tipo 3 desde 10.0.30.0/24) resulto NO ser fiable. La
+       re-validacion de la linea base (Escenario 1) mostro que el trafico de
+       ADMINISTRACION legitimo (WinRM/RDP del administrador desde la VLAN de
+       gestion, como Administrator y por IP -> NTLM) genera exactamente la misma
+       firma, produciendo 31 falsas alarmas. Conclusion metodologica: a nivel de
+       RED, el Pass-the-Hash es indistinguible de la administracion remota
+       legitima. Por eso 100032 se degrada a INFORMATIVA (nivel 3, fuera del
+       grupo 'attack'): se conserva como contexto/auditoria, pero la deteccion
+       fiable del ataque pasa a la evidencia de HOST (comportamiento de la
+       tecnica), ver nota de abajo. -->
+  <rule id="100032" level="3">
+    <if_group>windows</if_group>
+    <field name="win.system.eventID">4624</field>
+    <field name="win.eventdata.logonType">3</field>
+    <field name="win.eventdata.authenticationPackageName">NTLM</field>
+    <field name="win.eventdata.ipAddress" type="pcre2">^10\.0\.30\.</field>
+    <description>Logon de red NTLM tipo 3 desde el segmento de gestion (informativo; contexto de posible movimiento lateral)</description>
+    <group>ntlm_logon,informativo,</group>
+  </rule>
+
+  <!-- DETECCION FIABLE DE PtH (basada en HOST, no en red): el movimiento lateral
+       con Impacket (psexec/smbexec) deja caer un binario de servicio por los
+       recursos administrativos (ADMIN$) y crea un servicio que arranca desde la
+       raiz de Windows. La regla NATIVA 92650 ("New Windows Service Created to
+       start from windows root path... binary may have been dropped using Windows
+       Admin Shares", nivel 12) captura justo ese comportamiento. Se verifico que
+       92650 (a) disparo sobre el PtH real y (b) NO disparo ni una vez sobre el
+       trafico de administracion legitimo de la linea base -> 0 falsos positivos.
+       100031 (Sysmon, nombre de imagen psexec/wmiexec) se conserva como refuerzo,
+       aunque Impacket usa binarios de nombre aleatorio y a menudo no coincide. -->
+  <rule id="100031" level="13">
+    <if_group>sysmon_event1</if_group>
+    <field name="win.eventdata.image" type="pcre2">(?i)psexec|wmiexec|smbexec|atexec</field>
+    <description>Herramienta de movimiento lateral detectada via Sysmon (PsExec/Impacket) (T1021/T1550.002)</description>
+    <mitre><id>T1021.002</id></mitre>
+    <group>attack,lateral_movement,pth,</group>
+  </rule>
+
+  <!-- ============ 4. INYECCION SQL (T1190) ============ -->
+  <rule id="100040" level="10">
+    <if_sid>31108,31106</if_sid>
+    <regex type="pcre2">(?i)(union(.*)select|select(.*)from|sleep\(|benchmark\(|or 1=1|' or '1'='1)</regex>
+    <description>Intento de inyeccion SQL detectado en logs del servidor web (T1190)</description>
+    <mitre><id>T1190</id></mitre>
+    <group>attack,web,sqli,</group>
+  </rule>
+
+  <rule id="100041" level="8">
+    <if_sid>86601</if_sid>
+    <field name="alert.signature" type="pcre2">(?i)sql injection|sqlmap</field>
+    <description>Firma Suricata: intento de inyeccion SQL / uso de sqlmap (T1190)</description>
+    <mitre><id>T1190</id></mitre>
+    <group>attack,web,sqli,</group>
+  </rule>
+
+  <!-- ============ 5. EJECUCION DE PAYLOAD MALICIOSO (T1203 / T1059 / T1204) ============ -->
+  <rule id="100050" level="13">
+    <if_group>sysmon_event1</if_group>
+    <field name="win.eventdata.parentImage" type="pcre2">(?i)winword|excel|powerpnt|outlook</field>
+    <field name="win.eventdata.image" type="pcre2">(?i)powershell|cmd\.exe|mshta|wscript|cscript</field>
+    <description>Posible ejecucion de payload: proceso hijo sospechoso de aplicacion ofimatica (T1204/T1059)</description>
+    <mitre><id>T1204.002</id></mitre>
+    <group>attack,execution,payload,</group>
+  </rule>
+
+  <rule id="100051" level="12">
+    <if_group>sysmon_event1</if_group>
+    <field name="win.eventdata.commandLine" type="pcre2">(?i)-enc |-encodedcommand|downloadstring|invoke-expression|iex\(</field>
+    <description>Comando PowerShell ofuscado/descarga remota tipico de payload malicioso (T1059.001)</description>
+    <mitre><id>T1059.001</id></mitre>
+    <group>attack,execution,payload,</group>
+  </rule>
+
+  <!-- ============ CORRELACION ESCENARIO 3 (mixto) ============ -->
+  <!-- TUNING: se sube el umbral de 2 a 3 familias de ataque distintas para
+       reducir falsos positivos de correlacion (antes se disparaba en cascada
+       por el ruido de la antigua 100030). Con 100030 ya fuera del grupo
+       'attack', esta correlacion solo se dispara ante actividad ofensiva real. -->
+  <rule id="100099" level="14" frequency="3" timeframe="600">
+    <if_matched_group>attack</if_matched_group>
+    <different_srcip />
+    <description>Multiples familias de ataque detectadas en ventana de 10 min (correlacion escenario mixto)</description>
+    <group>correlation,escenario3,</group>
+  </rule>
+
+</group>
