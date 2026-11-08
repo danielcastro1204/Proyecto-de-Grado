@@ -157,3 +157,22 @@ Artefactos de datos por escenario en `resultados_v4/escenario{1,2,3}/`: alertas 
 ## 7. Conclusión
 
 El laboratorio SIEM detecta las **5 técnicas MITRE ATT&CK de la metodología al 100%** de forma estricta, con **0 falsas alarmas accionables** sobre tráfico legítimo y **precisión del 97–100%** bajo carga realista, cumpliendo el criterio de éxito (≥80%). Más allá del número, el aporte metodológico es el **ciclo de ingeniería de detección** ejecutado: se hallaron cuatro deficiencias reales (falsos positivos de autenticación, cobertura de sensores para escaneo, ingesta de Sysmon y detección de payload), se analizó su causa raíz y se corrigieron con re-validación medible, documentando las limitaciones residuales y las recomendaciones de mejora. Esto demuestra no solo que el SIEM "detecta", sino **por qué** detecta, **dónde** falla y **cómo** se mejora — el objetivo real de un trabajo de validación de detección.
+
+---
+
+## 8. Estado del apagado del laboratorio (teardown)
+
+> **ACCIÓN PENDIENTE PARA EL USUARIO:** no se pudo apagar el laboratorio automáticamente.
+
+Al intentar eliminar el stack de CloudFormation (`aws cloudformation delete-stack --stack-name siem-lab`), las **credenciales temporales de AWS Academy habían expirado** (`ExpiredToken`) — es normal: el token del sandbox dura unas pocas horas y la corrida completa (3 escenarios + 4 iteraciones de tuning) superó esa ventana. No es posible refrescar el token desde aquí, porque proviene del portal de AWS Academy.
+
+**Qué hacer al despertar (cualquiera de las dos opciones apaga todo):**
+
+1. **Opción simple (recomendada):** entrar al portal de **AWS Academy → Learner Lab** y pulsar **"End Lab"**. Esto detiene y limpia todas las instancias y recursos del sandbox. No requiere CLI.
+
+2. **Opción por CLI (si quieres borrar solo el stack):** en el portal, abrir **"AWS Details"**, copiar las nuevas credenciales (`aws_access_key_id`, `aws_secret_access_key`, `aws_session_token`) al archivo de credenciales, y ejecutar:
+   ```bash
+   aws cloudformation delete-stack --stack-name siem-lab
+   ```
+
+**No se pierde nada con el apagado:** todos los datos, alertas, logs y reportes ya están guardados localmente en `resultados_v4/` y versionados en git. El laboratorio es reproducible desde CloudFormation cuando se necesite.
