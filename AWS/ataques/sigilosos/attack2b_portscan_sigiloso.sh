@@ -20,11 +20,11 @@ echo "[+] Escaneo SIGILOSO del perimetro ${FW_IP} y de ${TARGET} (-T1 paranoico,
 # perimetro primero y con un conjunto amplio de puertos (>= umbral de 100022)
 # para que la deteccion por correlacion sea fiable aun siendo sigilosa.
 # (Se omiten los senuelos -D para no fragmentar la correlacion por IP origen.)
-sudo nmap -sS -T1 -f --scan-delay 1s -p 22,23,25,135,139,445,1433,3306,3389,5985 \
+sudo nmap $(fam6 "$FW_IP") -sS -T1 -f --scan-delay 1s -p 22,23,25,135,139,445,1433,3306,3389,5985 \
   "${FW_IP}" -oN "/tmp/nmap_sigiloso_fw_$(date +%s).log" &>/dev/null || true
 # Escaneo del host interno (punto ciego: no cruza un sensor) — se mantiene para
 # documentar la limitacion de cobertura frente al barrido sigiloso.
-sudo nmap -sS -T1 -f --scan-delay 2s -p 22,80,135,139,389,443,445,3389,5985 \
+sudo nmap $(fam6 "$TARGET") -sS -T1 -f --scan-delay 2s -p 22,80,135,139,389,443,445,3389,5985 \
   "${TARGET}" -oN "/tmp/nmap_sigiloso_$(date +%s).log" &>/dev/null || true
 log_fin "portscan_sigiloso" "T1046" "${TARGET}" "${INICIO}" "1"
 echo "[+] Ataque sigiloso registrado en log_ataques.csv"
