@@ -180,6 +180,16 @@ switch ($state) {
     # recogen salvo que se anada este <localfile>. Sin esto, las reglas de
     # ejecucion de payload (100050/100051) y la deteccion de herramientas de
     # movimiento lateral via Sysmon (100031) nunca se disparan.
+    # --- PowerShell Script Block Logging (Event 4104) -----------------------
+    # Registra el contenido DECODIFICADO de los scripts de PowerShell, incluidos
+    # los ejecutados con -EncodedCommand. Refuerza la deteccion de payloads
+    # ofuscados (download cradles IEX/DownloadString) junto con Sysmon Event 1.
+    try {
+      $sbl = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\PowerShell\ScriptBlockLogging"
+      New-Item -Path $sbl -Force | Out-Null
+      Set-ItemProperty -Path $sbl -Name EnableScriptBlockLogging -Value 1 -Type DWord
+    } catch { Write-Warning "No se pudo habilitar Script Block Logging: $_" }
+
     $ossecConf = "C:\Program Files (x86)\ossec-agent\ossec.conf"
     if ((Test-Path $ossecConf) -and -not (Select-String -Path $ossecConf -Pattern "Sysmon/Operational" -SimpleMatch -Quiet)) {
       Log "Suscribiendo el agente al canal Microsoft-Windows-Sysmon/Operational..."
