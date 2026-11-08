@@ -133,3 +133,15 @@ Artefactos por escenario en `resultados_v5/escenario{1,2,3}/`: alertas completas
 ## 7. Conclusión
 
 El laboratorio SIEM detecta las **5 técnicas MITRE ATT&CK de la metodología al 100%** de forma estricta, con **0 falsas alarmas accionables** sobre tráfico legítimo y **precisión del 98–100%** bajo carga realista, cumpliendo el criterio de éxito (≥80%). El trabajo demuestra, además de la cifra, un **ciclo de ingeniería de detección** completo (detectar → medir → analizar → ajustar → re-validar) que halló y corrigió cuatro deficiencias reales, y cuya versión definitiva es **reproducible end-to-end desde cero**. El SIEM no solo "detecta": se entiende **por qué** detecta, **dónde** falla (evasión, cobertura de sensores) y **cómo** se mejora.
+
+---
+
+## 8. Estado del apagado (teardown)
+
+**Laboratorio apagado correctamente.** Al finalizar la 5ª corrida se eliminó toda la infraestructura vía CLI (las credenciales seguían vigentes):
+
+- Stack de CloudFormation `siem-lab`: **eliminado** (DELETE_COMPLETE).
+- Bucket S3 del bundle de aprovisionamiento: vaciado y eliminado.
+- Instancias EC2 en ejecución: **0** (verificado).
+
+No queda ningún recurso consumiendo presupuesto del sandbox. Todos los datos, alertas, logs y reportes están guardados localmente en `resultados_v5/` y versionados en git. El laboratorio es reproducible desde CloudFormation (`./deploy.sh`) cuando se necesite.
