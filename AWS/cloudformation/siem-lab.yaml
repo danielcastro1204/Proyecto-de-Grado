@@ -1,0 +1,738 @@
+AWSTemplateFormatVersion: "2010-09-09"
+
+# =============================================================================
+#  siem-lab.yaml  —  Migración a AWS del laboratorio SIEM (Wazuh) del proyecto
+#  de grado "Plataforma SIEM Open Source para Monitoreo de Eventos de Seguridad".
+#
+#  Reproduce en AWS la red empresarial simulada que antes corría en VirtualBox
+#  + Vagrant, conservando el esquema de direccionamiento (último octeto) y las
+#  5 fuentes de logs exigidas por la metodología:
+#     1. Autenticación de Active Directory (windows-dc)
+#     2. Logs de firewall perimetral (fw-gateway, sustituto de pfSense: nftables
+#        + rsyslog -> Wazuh/514)   [+ opcional VPC Flow Logs]
+#     3. Logs del servidor web (web-server, Apache)
+#     4. Telemetría Sysmon de estaciones Windows (win-ws-*)
+#     5. Alertas del IDS Suricata (sobre el web-server)
+#
+#  VLAN física  ->  Subred AWS           ->  Rango
+#     VLAN 10 (Servidores)  -> subnet-serv  -> 10.0.10.0/24   (192.168.10.0/24)
+#     VLAN 20 (Clientes)    -> subnet-cli   -> 10.0.20.0/24   (192.168.20.0/24)
+#     VLAN 30 (Gestión)     -> subnet-gest  -> 10.0.30.0/24   (192.168.30.0/24)
+#
+#  Diseñado para el SANDBOX de "AWS Academy Cloud Architecting":
+#    - NO crea roles/políticas IAM (prohibido). Usa el perfil preexistente
+#      (LabInstanceProfile / LabRole) solo para que los EC2 lean los scripts.
+#    - AMIs resueltas vía parámetros públicos de SSM (sin IDs fijos).
+#    - Región objetivo: us-east-1.
+# =============================================================================
+
+Description: >
+  Laboratorio SIEM Wazuh migrado a AWS (red empresarial simulada en 3 subredes
+  = VLAN 10/20/30). Despliegue 100% automatizado vía CloudFormation + user-data.
+
+# -----------------------------------------------------------------------------
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label: { default: "1. Acceso y scripts" }
+        Parameters: [KeyName, ScriptsBaseUrl, InstanceProfileName, AdminIngressCidr]
+      - Label: { default: "2. Alcance del despliegue" }
+        Parameters: [Perfil]
+      - Label: { default: "3. Tipos de instancia" }
+        Parameters: [WazuhInstanceType, WindowsInstanceType, ServerInstanceType, SmallInstanceType]
+      - Label: { default: "4. AMIs (SSM - no modificar salvo necesidad)" }
+        Parameters: [UbuntuAmiId, WindowsAmiId]
+      - Label: { default: "5. Opciones de red" }
+        Parameters: [EnableVpcFlowLogs]
+
+# -----------------------------------------------------------------------------
+Parameters:
+
+  KeyName:
+    Type: AWS::EC2::KeyPair::KeyName
+    Default: vockey
+    Description: >
+      Par de claves EC2. En AWS Academy usa el preexistente 'vockey' (descarga
+      labsuser.pem desde "AWS Details"). SSH a Ubuntu con usuario 'ubuntu'.
+
+  ScriptsBaseUrl:
+    Type: String
+    Description: >
+      Origen de los scripts de aprovisionamiento. Formatos admitidos:
+        s3://MI-BUCKET/AWS        (recomendado; deploy.sh lo crea y sube)
+        https://.../AWS           (p.ej. GitHub raw del repo, carpeta AWS/)
+      Las instancias descargan de aquí userdata/, deteccion/, config/, etc.
+    AllowedPattern: "^(s3://|https://).+"
+    ConstraintDescription: "Debe empezar por s3:// o https://"
+
+  InstanceProfileName:
+    Type: String
+    Default: ""
+    Description: >
+      Perfil de instancia para las EC2. En este sandbox IAM es de SOLO LECTURA
+      (no se pueden crear perfiles) y no se garantiza uno utilizable, por eso el
+      valor por defecto es VACÍO: las instancias descargan los scripts mediante
+      una URL prefirmada de S3 (deploy.sh la genera), sin necesitar rol. Solo
+      ponlo si tu cuenta tiene un perfil de instancia preexistente y usable.
+
+  AdminIngressCidr:
+    Type: String
+    Default: 0.0.0.0/0
+    Description: >
+      CIDR desde el que podrás administrar el lab (SSH 22, RDP 3389, dashboard
+      443). Recomendado: TU_IP_PUBLICA/32. 0.0.0.0/0 solo para pruebas rápidas.
+    AllowedPattern: "^\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}/\\d{1,2}$"
+
+  Perfil:
+    Type: String
+    Default: completa
+    AllowedValues: [minima, completa]
+    Description: >
+      LÍMITE DEL SANDBOX: máximo 9 instancias (más = cuenta suspendida).
+      minima   = 7 instancias (SIEM, DC, web+Suricata, firewall, atacante, 1 Win,
+                 1 Linux) -> cubre las 5 fuentes de logs y los 5 ataques.
+      completa = 9 instancias (minima + DNS1 + NTP) para más tráfico normal y la
+                 sincronización horaria (supuesto metodológico). Es el máximo
+                 permitido. Otros servicios (DNS2/DHCP/SMTP/2ª estación) están en
+                 el repo y se intercambian editando el template sin pasar de 9.
+
+  WazuhInstanceType:
+    Type: String
+    Default: t3.medium
+    AllowedValues: [t3.medium, t2.medium]
+    Description: >
+      SIEM Wazuh all-in-one. El sandbox limita a t3.medium (2 vCPU / 4 GB) como
+      máximo; el script ajusta el heap del indexer para caber en 4 GB.
+
+  WindowsInstanceType:
+    Type: String
+    Default: t3.medium
+    AllowedValues: [t3.medium, t2.medium]
+    Description: "DC y estaciones Windows (máximo t3.medium = 4 GB en el sandbox)."
+
+  ServerInstanceType:
+    Type: String
+    Default: t3.small
+    AllowedValues: [t3.nano, t3.micro, t3.small, t3.medium, t2.micro, t2.small, t2.medium]
+    Description: "web-server y servicios Linux (DNS/NTP)."
+
+  SmallInstanceType:
+    Type: String
+    Default: t3.small
+    AllowedValues: [t3.nano, t3.micro, t3.small, t3.medium, t2.micro, t2.small, t2.medium]
+    Description: "firewall, atacante y estaciones Linux."
+
+  UbuntuAmiId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/canonical/ubuntu/server/22.04/stable/current/amd64/hvm/ebs-gp2/ami-id
+    Description: "Ubuntu Server 22.04 LTS (resuelto por SSM)."
+
+  WindowsAmiId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-windows-latest/Windows_Server-2019-English-Full-Base
+    Description: >
+      Windows Server 2019 (resuelto por SSM). Hace de DC y también de estación
+      Windows (AWS no ofrece AMIs de Windows 10 cliente; el miembro de dominio
+      con Sysmon es equivalente para las fuentes de detección del proyecto).
+
+  EnableVpcFlowLogs:
+    Type: String
+    Default: "no"
+    AllowedValues: ["si", "no"]
+    Description: >
+      "si" añade VPC Flow Logs a CloudWatch como fuente de firewall adicional
+      nativa de AWS (requiere que LabRole exista; usa ese rol). Déjalo en "no"
+      si tu sandbox no permite la entrega de flow logs.
+
+# -----------------------------------------------------------------------------
+Conditions:
+  CondCompleta:      !Equals [!Ref Perfil, completa]
+  CondUsaPerfil:     !Not [!Equals [!Ref InstanceProfileName, ""]]
+  CondFlowLogs:      !Equals [!Ref EnableVpcFlowLogs, "si"]
+
+# -----------------------------------------------------------------------------
+Mappings:
+  Red:
+    vpc:        { cidr: "10.0.0.0/16" }
+    servidores: { cidr: "10.0.10.0/24" }   # VLAN 10
+    clientes:   { cidr: "10.0.20.0/24" }   # VLAN 20
+    gestion:    { cidr: "10.0.30.0/24" }   # VLAN 30
+
+# =============================================================================
+Resources:
+
+  # ------------------------- Red base -------------------------------------
+  Vpc:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !FindInMap [Red, vpc, cidr]
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags: [{ Key: Name, Value: siem-lab-vpc }, { Key: Proyecto, Value: SIEM-Wazuh }]
+
+  # --- DUAL-STACK: bloque IPv6 /56 asignado por Amazon a la VPC ---
+  VpcIpv6Cidr:
+    Type: AWS::EC2::VPCCidrBlock
+    Properties:
+      VpcId: !Ref Vpc
+      AmazonProvidedIpv6CidrBlock: true
+
+  Igw:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags: [{ Key: Name, Value: siem-lab-igw }]
+
+  IgwAttach:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties: { VpcId: !Ref Vpc, InternetGatewayId: !Ref Igw }
+
+  # --- DUAL-STACK: gateway de SOLO salida para IPv6 (equivalente al NAT en v6).
+  # Da a las instancias IPv6 saliente e intra-VPC, sin exponerlas a Internet por
+  # IPv6 (los ataques del lab son intra-VPC; el admin entra por IPv4). ---
+  EgressOnlyIgw:
+    Type: AWS::EC2::EgressOnlyInternetGateway
+    Properties: { VpcId: !Ref Vpc }
+
+  PublicRt:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref Vpc
+      Tags: [{ Key: Name, Value: siem-lab-rt }]
+
+  DefaultRoute:
+    Type: AWS::EC2::Route
+    DependsOn: IgwAttach
+    Properties:
+      RouteTableId: !Ref PublicRt
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref Igw
+
+  # --- DUAL-STACK: ruta por defecto IPv6 (::/0) al gateway de solo salida ---
+  DefaultRouteIpv6:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PublicRt
+      DestinationIpv6CidrBlock: "::/0"
+      EgressOnlyInternetGatewayId: !Ref EgressOnlyIgw
+
+  SubnetServidores:              # VLAN 10
+    Type: AWS::EC2::Subnet
+    DependsOn: VpcIpv6Cidr
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: !FindInMap [Red, servidores, cidr]
+      Ipv6CidrBlock: !Select [0, !Cidr [!Select [0, !GetAtt Vpc.Ipv6CidrBlocks], 3, 64]]
+      AssignIpv6AddressOnCreation: true
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      MapPublicIpOnLaunch: true
+      Tags: [{ Key: Name, Value: "siem-subnet-servidores (VLAN10)" }]
+
+  SubnetClientes:                # VLAN 20
+    Type: AWS::EC2::Subnet
+    DependsOn: VpcIpv6Cidr
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: !FindInMap [Red, clientes, cidr]
+      Ipv6CidrBlock: !Select [1, !Cidr [!Select [0, !GetAtt Vpc.Ipv6CidrBlocks], 3, 64]]
+      AssignIpv6AddressOnCreation: true
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      MapPublicIpOnLaunch: true
+      Tags: [{ Key: Name, Value: "siem-subnet-clientes (VLAN20)" }]
+
+  SubnetGestion:                 # VLAN 30
+    Type: AWS::EC2::Subnet
+    DependsOn: VpcIpv6Cidr
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: !FindInMap [Red, gestion, cidr]
+      Ipv6CidrBlock: !Select [2, !Cidr [!Select [0, !GetAtt Vpc.Ipv6CidrBlocks], 3, 64]]
+      AssignIpv6AddressOnCreation: true
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      MapPublicIpOnLaunch: true
+      Tags: [{ Key: Name, Value: "siem-subnet-gestion (VLAN30)" }]
+
+  RtaServidores:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties: { SubnetId: !Ref SubnetServidores, RouteTableId: !Ref PublicRt }
+  RtaClientes:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties: { SubnetId: !Ref SubnetClientes, RouteTableId: !Ref PublicRt }
+  RtaGestion:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties: { SubnetId: !Ref SubnetGestion, RouteTableId: !Ref PublicRt }
+
+  # ------------------------- Security Groups ------------------------------
+  # Filtrado perimetral equivalente al que hacía pfSense/router entre VLANs.
+
+  SgSiem:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: "SIEM Wazuh (VLAN30) - dashboard, API, agentes, syslog"
+      VpcId: !Ref Vpc
+      SecurityGroupIngress:
+        - { IpProtocol: tcp, FromPort: 443,   ToPort: 443,   CidrIp: !Ref AdminIngressCidr, Description: "Dashboard Wazuh (admin)" }
+        - { IpProtocol: tcp, FromPort: 22,    ToPort: 22,    CidrIp: !Ref AdminIngressCidr, Description: "SSH (admin)" }
+        - { IpProtocol: tcp, FromPort: 55000, ToPort: 55000, CidrIp: !Ref AdminIngressCidr, Description: "Wazuh API (admin)" }
+        - { IpProtocol: tcp, FromPort: 1514,  ToPort: 1516,  CidrIp: !FindInMap [Red, vpc, cidr], Description: "Agentes Wazuh (lab)" }
+        - { IpProtocol: udp, FromPort: 1514,  ToPort: 1514,  CidrIp: !FindInMap [Red, vpc, cidr], Description: "Agentes Wazuh UDP (lab)" }
+        - { IpProtocol: udp, FromPort: 514,   ToPort: 514,   CidrIp: !FindInMap [Red, vpc, cidr], Description: "Syslog firewall/dispositivos (lab)" }
+        # DUAL-STACK: trafico intra-lab IPv6 (solo intra-VPC: el egress-only IGW bloquea el ingreso IPv6 de Internet)
+        - { IpProtocol: -1, CidrIpv6: "::/0", Description: "Trafico intra-lab IPv6 (agentes/syslog dual-stack)" }
+      Tags: [{ Key: Name, Value: sg-siem-wazuh }]
+
+  SgServidores:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: "Segmento de servidores (VLAN10): web, DC, DNS, DHCP, SMTP, NTP"
+      VpcId: !Ref Vpc
+      SecurityGroupIngress:
+        - { IpProtocol: tcp, FromPort: 80,  ToPort: 80,  CidrIp: !FindInMap [Red, vpc, cidr], Description: "HTTP" }
+        - { IpProtocol: tcp, FromPort: 443, ToPort: 443, CidrIp: !FindInMap [Red, vpc, cidr], Description: "HTTPS" }
+        - { IpProtocol: tcp, FromPort: 80,  ToPort: 80,  CidrIp: !Ref AdminIngressCidr, Description: "HTTP (admin)" }
+        - { IpProtocol: tcp, FromPort: 22,  ToPort: 22,  CidrIp: !Ref AdminIngressCidr, Description: "SSH (admin)" }
+        - { IpProtocol: tcp, FromPort: 3389, ToPort: 3389, CidrIp: !Ref AdminIngressCidr, Description: "RDP DC (admin)" }
+        # Dominio / servicios internos del lab (AD, DNS, LDAP, Kerberos, SMB, DHCP, SMTP, NTP)
+        - { IpProtocol: -1, CidrIp: !FindInMap [Red, vpc, cidr], Description: "Todo el trafico intra-lab entre VLANs" }
+        - { IpProtocol: -1, CidrIpv6: "::/0", Description: "Trafico intra-lab IPv6 (dual-stack)" }
+      Tags: [{ Key: Name, Value: sg-servidores }]
+
+  SgClientes:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: "Estaciones de trabajo (VLAN20): Windows/Linux de usuario"
+      VpcId: !Ref Vpc
+      SecurityGroupIngress:
+        - { IpProtocol: tcp, FromPort: 3389, ToPort: 3389, CidrIp: !Ref AdminIngressCidr, Description: "RDP (admin)" }
+        - { IpProtocol: tcp, FromPort: 22,   ToPort: 22,   CidrIp: !Ref AdminIngressCidr, Description: "SSH (admin)" }
+        - { IpProtocol: -1, CidrIp: !FindInMap [Red, vpc, cidr], Description: "Trafico intra-lab (ataques controlados, dominio)" }
+        - { IpProtocol: -1, CidrIpv6: "::/0", Description: "Trafico intra-lab IPv6 (dual-stack)" }
+      Tags: [{ Key: Name, Value: sg-clientes }]
+
+  SgGestion:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: "Gestion (VLAN30): firewall-gateway y estacion atacante"
+      VpcId: !Ref Vpc
+      SecurityGroupIngress:
+        - { IpProtocol: tcp, FromPort: 22,  ToPort: 22,  CidrIp: !Ref AdminIngressCidr, Description: "SSH (admin)" }
+        - { IpProtocol: -1, CidrIp: !FindInMap [Red, vpc, cidr], Description: "Trafico intra-lab" }
+        - { IpProtocol: -1, CidrIpv6: "::/0", Description: "Trafico intra-lab IPv6 (dual-stack)" }
+      Tags: [{ Key: Name, Value: sg-gestion }]
+
+  # ------------------------- VPC Flow Logs (opcional) ---------------------
+  FlowLogsGroup:
+    Type: AWS::Logs::LogGroup
+    Condition: CondFlowLogs
+    Properties:
+      LogGroupName: /siem-lab/vpc-flow-logs
+      RetentionInDays: 7
+
+  VpcFlowLog:
+    Type: AWS::EC2::FlowLog
+    Condition: CondFlowLogs
+    Properties:
+      ResourceId: !Ref Vpc
+      ResourceType: VPC
+      TrafficType: ALL
+      LogGroupName: !Ref FlowLogsGroup
+      # En AWS Academy el rol de entrega es el LabRole preexistente:
+      DeliverLogsPermissionArn: !Sub "arn:aws:iam::${AWS::AccountId}:role/LabRole"
+
+  # =========================================================================
+  #  INSTANCIAS EC2
+  #  La user-data de cada una descarga ScriptsBaseUrl y ejecuta su script de
+  #  aprovisionamiento con las variables de entorno del proyecto.
+  # =========================================================================
+
+  # ---- SIEM Wazuh  (VLAN30 .10) ----
+  Wazuh:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: !Ref WazuhInstanceType
+      ImageId: !Ref UbuntuAmiId
+      KeyName: !Ref KeyName
+      IamInstanceProfile: !If [CondUsaPerfil, !Ref InstanceProfileName, !Ref "AWS::NoValue"]
+      SubnetId: !Ref SubnetGestion
+      PrivateIpAddress: 10.0.30.10
+      Ipv6AddressCount: 1
+      SecurityGroupIds: [!Ref SgSiem]
+      BlockDeviceMappings:
+        - { DeviceName: /dev/sda1, Ebs: { VolumeSize: 35, VolumeType: gp2, DeleteOnTermination: true } }
+      Tags: [{ Key: Name, Value: "SIEM-Wazuh (VLAN30)" }, { Key: Rol, Value: siem }]
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          exec > /var/log/siem-bootstrap.log 2>&1
+          set -x
+          export LAB_ROLE="wazuh"
+          export SCRIPTS_BASE_URL="${ScriptsBaseUrl}"
+          export SIEM_IP="10.0.30.10"
+          export VPC_CIDR="10.0.0.0/16"
+          apt-get update -y || true
+          DEBIAN_FRONTEND=noninteractive apt-get install -y awscli curl unzip git || (snap install aws-cli --classic || true)
+          mkdir -p /opt/lab
+          case "$SCRIPTS_BASE_URL" in
+            s3://*)    aws s3 cp "$SCRIPTS_BASE_URL" /opt/lab --recursive ;;
+            https://*) curl -fsSL "$SCRIPTS_BASE_URL" -o /tmp/lab-bundle.tgz && tar -xzf /tmp/lab-bundle.tgz -C /opt/lab ;;
+          esac
+          chmod -R +x /opt/lab/userdata /opt/lab/ataques /opt/lab/escenarios 2>/dev/null || true
+          export LAB_DIR=/opt/lab
+          run_lab_script(){ bash "/opt/lab/$1"; }
+          run_lab_script "userdata/wazuh-server.sh"
+
+  # ---- Firewall perimetral (sustituto pfSense)  (VLAN30 .30) ----
+  FwGateway:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: !Ref SmallInstanceType
+      ImageId: !Ref UbuntuAmiId
+      KeyName: !Ref KeyName
+      IamInstanceProfile: !If [CondUsaPerfil, !Ref InstanceProfileName, !Ref "AWS::NoValue"]
+      SubnetId: !Ref SubnetGestion
+      PrivateIpAddress: 10.0.30.30
+      Ipv6AddressCount: 1
+      SecurityGroupIds: [!Ref SgGestion]
+      Tags: [{ Key: Name, Value: "Firewall-Gateway (VLAN30 - sustituto pfSense)" }, { Key: Rol, Value: firewall }]
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          exec > /var/log/siem-bootstrap.log 2>&1
+          set -x
+          export SCRIPTS_BASE_URL="${ScriptsBaseUrl}"
+          export SIEM_IP="10.0.30.10"
+          export VPC_CIDR="10.0.0.0/16"
+          apt-get update -y || true
+          DEBIAN_FRONTEND=noninteractive apt-get install -y awscli curl unzip git || (snap install aws-cli --classic || true)
+          mkdir -p /opt/lab
+          case "$SCRIPTS_BASE_URL" in
+            s3://*)    aws s3 cp "$SCRIPTS_BASE_URL" /opt/lab --recursive ;;
+            https://*) curl -fsSL "$SCRIPTS_BASE_URL" -o /tmp/lab-bundle.tgz && tar -xzf /tmp/lab-bundle.tgz -C /opt/lab ;;
+          esac
+          chmod -R +x /opt/lab/userdata /opt/lab/ataques /opt/lab/escenarios 2>/dev/null || true
+          export LAB_DIR=/opt/lab
+          run_lab_script(){ bash "/opt/lab/$1"; }
+          run_lab_script "userdata/fw-gateway.sh"
+
+  # ---- Estación atacante (sustituto Kali)  (VLAN30 .20) ----
+  Attacker:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: !Ref SmallInstanceType
+      ImageId: !Ref UbuntuAmiId
+      KeyName: !Ref KeyName
+      IamInstanceProfile: !If [CondUsaPerfil, !Ref InstanceProfileName, !Ref "AWS::NoValue"]
+      SubnetId: !Ref SubnetGestion
+      PrivateIpAddress: 10.0.30.20
+      Ipv6AddressCount: 1
+      SecurityGroupIds: [!Ref SgGestion]
+      BlockDeviceMappings:
+        - { DeviceName: /dev/sda1, Ebs: { VolumeSize: 30, VolumeType: gp2, DeleteOnTermination: true } }
+      Tags: [{ Key: Name, Value: "Atacante (VLAN30 - sustituto Kali)" }, { Key: Rol, Value: atacante }]
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          exec > /var/log/siem-bootstrap.log 2>&1
+          set -x
+          export SCRIPTS_BASE_URL="${ScriptsBaseUrl}"
+          export SIEM_IP="10.0.30.10"
+          export DC_IP="10.0.10.20"
+          export WEB_IP="10.0.10.10"
+          export WIN_WS_IP="10.0.20.30"
+          export SSH_TARGET="10.0.20.40"
+          apt-get update -y || true
+          DEBIAN_FRONTEND=noninteractive apt-get install -y awscli curl unzip git || (snap install aws-cli --classic || true)
+          mkdir -p /opt/lab
+          case "$SCRIPTS_BASE_URL" in
+            s3://*)    aws s3 cp "$SCRIPTS_BASE_URL" /opt/lab --recursive ;;
+            https://*) curl -fsSL "$SCRIPTS_BASE_URL" -o /tmp/lab-bundle.tgz && tar -xzf /tmp/lab-bundle.tgz -C /opt/lab ;;
+          esac
+          chmod -R +x /opt/lab/userdata /opt/lab/ataques /opt/lab/escenarios 2>/dev/null || true
+          export LAB_DIR=/opt/lab
+          run_lab_script(){ bash "/opt/lab/$1"; }
+          run_lab_script "userdata/attacker.sh"
+
+  # ---- Servidor Web + Suricata  (VLAN10 .10) ----
+  WebServer:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: !Ref ServerInstanceType
+      ImageId: !Ref UbuntuAmiId
+      KeyName: !Ref KeyName
+      IamInstanceProfile: !If [CondUsaPerfil, !Ref InstanceProfileName, !Ref "AWS::NoValue"]
+      SubnetId: !Ref SubnetServidores
+      PrivateIpAddress: 10.0.10.10
+      Ipv6AddressCount: 1
+      SecurityGroupIds: [!Ref SgServidores]
+      Tags: [{ Key: Name, Value: "Web-Server + Suricata (VLAN10)" }, { Key: Rol, Value: web }]
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          exec > /var/log/siem-bootstrap.log 2>&1
+          set -x
+          export SCRIPTS_BASE_URL="${ScriptsBaseUrl}"
+          export VM_IP="10.0.10.10"
+          export SIEM_IP="10.0.30.10"
+          export DC_IP="10.0.10.20"
+          export DOMAIN="empresa.local"
+          export INSTALL_SURICATA="true"
+          apt-get update -y || true
+          DEBIAN_FRONTEND=noninteractive apt-get install -y awscli curl unzip git || (snap install aws-cli --classic || true)
+          mkdir -p /opt/lab
+          case "$SCRIPTS_BASE_URL" in
+            s3://*)    aws s3 cp "$SCRIPTS_BASE_URL" /opt/lab --recursive ;;
+            https://*) curl -fsSL "$SCRIPTS_BASE_URL" -o /tmp/lab-bundle.tgz && tar -xzf /tmp/lab-bundle.tgz -C /opt/lab ;;
+          esac
+          chmod -R +x /opt/lab/userdata /opt/lab/ataques /opt/lab/escenarios 2>/dev/null || true
+          export LAB_DIR=/opt/lab
+          run_lab_script(){ bash "/opt/lab/$1"; }
+          run_lab_script "userdata/web-server.sh"
+
+  # ---- Controlador de Dominio  (VLAN10 .20) ----
+  WindowsDC:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: !Ref WindowsInstanceType
+      ImageId: !Ref WindowsAmiId
+      KeyName: !Ref KeyName
+      IamInstanceProfile: !If [CondUsaPerfil, !Ref InstanceProfileName, !Ref "AWS::NoValue"]
+      SubnetId: !Ref SubnetServidores
+      PrivateIpAddress: 10.0.10.20
+      Ipv6AddressCount: 1
+      SecurityGroupIds: [!Ref SgServidores]
+      BlockDeviceMappings:
+        - { DeviceName: /dev/sda1, Ebs: { VolumeSize: 35, VolumeType: gp2, DeleteOnTermination: true } }
+      Tags: [{ Key: Name, Value: "Windows-DC (VLAN10)" }, { Key: Rol, Value: dc }]
+      UserData:
+        Fn::Base64: !Sub |
+          <powershell>
+          Start-Transcript -Path C:\siem-bootstrap.log -Append
+          $env:SCRIPTS_BASE_URL = "${ScriptsBaseUrl}"
+          $env:LAB_ROLE = "dc"
+          $env:SIEM_IP = "10.0.30.10"
+          $env:DOMAIN  = "empresa.local"
+          New-Item -ItemType Directory -Force -Path C:\lab | Out-Null
+          # Tras promoverse a Controlador de Dominio, este equipo pasa a ser su
+          # propio servidor DNS (rol DNS instalado + NIC apuntando a sí mismo).
+          # Si en ese arranque el forwarder hacia el resolver de la VPC aún no
+          # está configurado (se configura dentro de windows-dc.ps1, fase
+          # POSTAD), la resolución de nombres externos (p.ej. el bucket S3 del
+          # paquete de scripts) falla y el script nunca llega a ejecutarse para
+          # poder configurarlo: un bloqueo circular. Se intenta el forwarder
+          # SIEMPRE (sin condicionarlo al estado exacto del servicio DNS en
+          # ese instante: justo tras el reinicio de la promoción, el servicio
+          # puede seguir "arrancando" cuando este script ya corre, y una
+          # comprobación de estado estricta pierde esa ventana). Además, la
+          # descarga se reintenta varias veces por si el DNS tarda unos
+          # segundos más en quedar listo para resolver.
+          $u = $env:SCRIPTS_BASE_URL
+          $descargado = $false
+          for ($intento = 1; $intento -le 5 -and -not $descargado; $intento++) {
+            try { Add-DnsServerForwarder -IPAddress "169.254.169.253" -ErrorAction SilentlyContinue } catch {}
+            try {
+              if ($u -like "s3://*") {
+                $awscli = "C:\Program Files\Amazon\AWSCLIV2\aws.exe"
+                if (-not (Test-Path $awscli)) { $awscli = "aws" }
+                & $awscli s3 cp $u C:\lab --recursive
+                if ($LASTEXITCODE -eq 0) { $descargado = $true }
+              } else {
+                [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+                Invoke-WebRequest -Uri $u -OutFile C:\lab\bundle.tgz -UseBasicParsing
+                tar.exe -xzf C:\lab\bundle.tgz -C C:\lab
+                $descargado = $true
+              }
+            } catch {
+              Write-Host "Intento $intento de descarga del paquete fallo: $_"
+              Start-Sleep -Seconds 15
+            }
+          }
+          function Invoke-LabScript($rel){ powershell -ExecutionPolicy Bypass -File ("C:\lab\" + $rel.Replace('/','\')) }
+          Invoke-LabScript "userdata/windows-dc.ps1"
+          </powershell>
+          <persist>true</persist>
+
+  # ---- Estación Windows #1  (VLAN20 .30) ----
+  WinWs01:
+    Type: AWS::EC2::Instance
+    DependsOn: WindowsDC
+    Properties:
+      InstanceType: !Ref WindowsInstanceType
+      ImageId: !Ref WindowsAmiId
+      KeyName: !Ref KeyName
+      IamInstanceProfile: !If [CondUsaPerfil, !Ref InstanceProfileName, !Ref "AWS::NoValue"]
+      SubnetId: !Ref SubnetClientes
+      PrivateIpAddress: 10.0.20.30
+      Ipv6AddressCount: 1
+      SecurityGroupIds: [!Ref SgClientes]
+      Tags: [{ Key: Name, Value: "Win-WS-01 (VLAN20)" }, { Key: Rol, Value: workstation-win }]
+      UserData:
+        Fn::Base64: !Sub |
+          <powershell>
+          Start-Transcript -Path C:\siem-bootstrap.log -Append
+          $env:SCRIPTS_BASE_URL = "${ScriptsBaseUrl}"
+          $env:LAB_ROLE = "winws"
+          $env:VM_HOSTNAME = "win-ws-01"
+          $env:VM_DNS = "10.0.10.20"
+          $env:SIEM_IP = "10.0.30.10"
+          $env:WAZUH_MANAGER_IP = "10.0.30.10"
+          $env:DOMAIN = "empresa.local"
+          New-Item -ItemType Directory -Force -Path C:\lab | Out-Null
+          # Tras la fase RENAME, el DNS de esta estación apunta al DC (para
+          # poder unirse al dominio). Si el DC aún no tiene listo su propio
+          # forwarder hacia el resolver de la VPC en ese momento exacto, la
+          # resolución de nombres externos falla transitoriamente. Se
+          # reintenta varias veces en vez de fallar a la primera.
+          $u = $env:SCRIPTS_BASE_URL
+          $descargado = $false
+          for ($intento = 1; $intento -le 5 -and -not $descargado; $intento++) {
+            try {
+              if ($u -like "s3://*") {
+                $awscli = "C:\Program Files\Amazon\AWSCLIV2\aws.exe"
+                if (-not (Test-Path $awscli)) { $awscli = "aws" }
+                & $awscli s3 cp $u C:\lab --recursive
+                if ($LASTEXITCODE -eq 0) { $descargado = $true }
+              } else {
+                [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+                Invoke-WebRequest -Uri $u -OutFile C:\lab\bundle.tgz -UseBasicParsing
+                tar.exe -xzf C:\lab\bundle.tgz -C C:\lab
+                $descargado = $true
+              }
+            } catch {
+              Write-Host "Intento $intento de descarga del paquete fallo: $_"
+              Start-Sleep -Seconds 15
+            }
+          }
+          function Invoke-LabScript($rel){ powershell -ExecutionPolicy Bypass -File ("C:\lab\" + $rel.Replace('/','\')) }
+          Invoke-LabScript "userdata/windows-ws.ps1"
+          </powershell>
+          <persist>true</persist>
+
+  # ---- Estación Linux #1  (VLAN20 .40) ----
+  LinuxWs01:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: !Ref SmallInstanceType
+      ImageId: !Ref UbuntuAmiId
+      KeyName: !Ref KeyName
+      IamInstanceProfile: !If [CondUsaPerfil, !Ref InstanceProfileName, !Ref "AWS::NoValue"]
+      SubnetId: !Ref SubnetClientes
+      PrivateIpAddress: 10.0.20.40
+      Ipv6AddressCount: 1
+      SecurityGroupIds: [!Ref SgClientes]
+      Tags: [{ Key: Name, Value: "Linux-WS-01 (VLAN20)" }, { Key: Rol, Value: workstation-linux }]
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          exec > /var/log/siem-bootstrap.log 2>&1
+          set -x
+          export SCRIPTS_BASE_URL="${ScriptsBaseUrl}"
+          export VM_IP="10.0.20.40"
+          export VM_HOSTNAME="linux-01"
+          export VM_DNS="10.0.10.20"
+          export SIEM_IP="10.0.30.10"
+          export WAZUH_MANAGER_IP="10.0.30.10"
+          apt-get update -y || true
+          DEBIAN_FRONTEND=noninteractive apt-get install -y awscli curl unzip git || (snap install aws-cli --classic || true)
+          mkdir -p /opt/lab
+          case "$SCRIPTS_BASE_URL" in
+            s3://*)    aws s3 cp "$SCRIPTS_BASE_URL" /opt/lab --recursive ;;
+            https://*) curl -fsSL "$SCRIPTS_BASE_URL" -o /tmp/lab-bundle.tgz && tar -xzf /tmp/lab-bundle.tgz -C /opt/lab ;;
+          esac
+          chmod -R +x /opt/lab/userdata /opt/lab/ataques /opt/lab/escenarios 2>/dev/null || true
+          export LAB_DIR=/opt/lab
+          run_lab_script(){ bash "/opt/lab/$1"; }
+          run_lab_script "userdata/linux-ws.sh"
+
+  # ===================== OPCIONALES (perfil 'completa' -> total 9) ===========
+  # Límite del sandbox: 9 instancias. 'completa' añade solo DNS1 + NTP (= 9).
+  # Los scripts de DNS2, DHCPv4, DHCPv6, SMTP y 2ª estación siguen en el repo
+  # (carpeta userdata/) y se pueden intercambiar por estos editando el template,
+  # siempre SIN superar 9 instancias en total.
+
+  Dns1:
+    Type: AWS::EC2::Instance
+    Condition: CondCompleta
+    Properties:
+      InstanceType: !Ref ServerInstanceType
+      ImageId: !Ref UbuntuAmiId
+      KeyName: !Ref KeyName
+      IamInstanceProfile: !If [CondUsaPerfil, !Ref InstanceProfileName, !Ref "AWS::NoValue"]
+      SubnetId: !Ref SubnetServidores
+      PrivateIpAddress: 10.0.10.50
+      Ipv6AddressCount: 1
+      SecurityGroupIds: [!Ref SgServidores]
+      Tags: [{ Key: Name, Value: "DNS1-BIND9 (VLAN10)" }, { Key: Rol, Value: dns }]
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          exec > /var/log/siem-bootstrap.log 2>&1
+          set -x
+          export SCRIPTS_BASE_URL="${ScriptsBaseUrl}"
+          export VM_IP="10.0.10.50"
+          export SIEM_IP="10.0.30.10"
+          export DOMAIN="empresa.local"
+          apt-get update -y || true
+          DEBIAN_FRONTEND=noninteractive apt-get install -y awscli curl unzip git || (snap install aws-cli --classic || true)
+          mkdir -p /opt/lab
+          case "$SCRIPTS_BASE_URL" in
+            s3://*)    aws s3 cp "$SCRIPTS_BASE_URL" /opt/lab --recursive ;;
+            https://*) curl -fsSL "$SCRIPTS_BASE_URL" -o /tmp/lab-bundle.tgz && tar -xzf /tmp/lab-bundle.tgz -C /opt/lab ;;
+          esac
+          chmod -R +x /opt/lab/userdata /opt/lab/ataques /opt/lab/escenarios 2>/dev/null || true
+          export LAB_DIR=/opt/lab
+          run_lab_script(){ bash "/opt/lab/$1"; }
+          run_lab_script "userdata/dns1-server.sh"
+
+  Ntp:
+    Type: AWS::EC2::Instance
+    Condition: CondCompleta
+    Properties:
+      InstanceType: !Ref ServerInstanceType
+      ImageId: !Ref UbuntuAmiId
+      KeyName: !Ref KeyName
+      IamInstanceProfile: !If [CondUsaPerfil, !Ref InstanceProfileName, !Ref "AWS::NoValue"]
+      SubnetId: !Ref SubnetServidores
+      PrivateIpAddress: 10.0.10.80
+      Ipv6AddressCount: 1
+      SecurityGroupIds: [!Ref SgServidores]
+      Tags: [{ Key: Name, Value: "NTP-chrony (VLAN10)" }, { Key: Rol, Value: ntp }]
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          exec > /var/log/siem-bootstrap.log 2>&1
+          set -x
+          export SCRIPTS_BASE_URL="${ScriptsBaseUrl}"
+          export VM_IP="10.0.10.80"
+          export SIEM_IP="10.0.30.10"
+          apt-get update -y || true
+          DEBIAN_FRONTEND=noninteractive apt-get install -y awscli curl unzip git || (snap install aws-cli --classic || true)
+          mkdir -p /opt/lab
+          case "$SCRIPTS_BASE_URL" in
+            s3://*)    aws s3 cp "$SCRIPTS_BASE_URL" /opt/lab --recursive ;;
+            https://*) curl -fsSL "$SCRIPTS_BASE_URL" -o /tmp/lab-bundle.tgz && tar -xzf /tmp/lab-bundle.tgz -C /opt/lab ;;
+          esac
+          chmod -R +x /opt/lab/userdata /opt/lab/ataques /opt/lab/escenarios 2>/dev/null || true
+          export LAB_DIR=/opt/lab
+          run_lab_script(){ bash "/opt/lab/$1"; }
+          run_lab_script "userdata/ntp-server.sh"
+
+# =============================================================================
+Outputs:
+  DashboardWazuh:
+    Description: "URL del dashboard de Wazuh (usuario admin; contrasena en /root/wazuh_passwords.txt)"
+    Value: !Sub "https://${Wazuh.PublicIp}"
+  WazuhPrivateIp:
+    Value: 10.0.30.10
+    Description: "IP privada del SIEM (los agentes la usan)"
+  WebServerUrl:
+    Value: !Sub "http://${WebServer.PublicIp}/"
+  DcPublicIp:
+    Description: "RDP al Controlador de Dominio (Administrator; obtener pass con la key pair)"
+    Value: !GetAtt WindowsDC.PublicIp
+  AttackerPublicIp:
+    Description: "SSH a la estacion atacante (ubuntu@...)"
+    Value: !GetAtt Attacker.PublicIp
+  RedResumen:
+    Description: "Mapa de direccionamiento del laboratorio"
+    Value: >-
+      SIEM=10.0.30.10 | FW=10.0.30.30 | Atacante=10.0.30.20 |
+      Web=10.0.10.10 | DC=10.0.10.20 | WinWS01=10.0.20.30 | LinuxWS01=10.0.20.40
