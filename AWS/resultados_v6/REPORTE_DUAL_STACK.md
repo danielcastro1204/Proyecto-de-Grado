@@ -91,3 +91,25 @@ Esto confirma que las fuentes de log (firewall nftables `inet`, Apache, sshd) y 
 ## 5. Conclusión
 
 El laboratorio SIEM es ahora **dual-stack IPv4+IPv6**: toda la infraestructura y los servicios existentes recibieron direccionamiento IPv6, la red enruta IPv6 intra-VPC, los servicios responden por ambas familias, la resolución de nombres es dual-stack y **el SIEM detecta amenazas con origen IPv6** con las mismas reglas. El direccionamiento IPv6 y la configuración de servicios se aprovisionan automáticamente desde CloudFormation/userdata, de modo que la propiedad dual-stack es reproducible. No se añadió DHCPv6: las instancias obtienen su IPv6 por SLAAC/RA de la VPC.
+
+---
+
+## 9. Validación formal: los 3 escenarios ejecutados SOBRE IPv6
+
+Además de la validación de conectividad y detección puntual, se ejecutaron los **3 escenarios completos de la metodología con los ataques y el tráfico dirigidos a direcciones IPv6**, para medir la detección de forma cuantitativa sobre IPv6. Las herramientas de ataque se adaptaron a dual-stack (hallazgo de tooling): nmap `-6`, hydra `-6`, sqlmap/curl con `[IPv6]`, Impacket con `-target-ip`, y evil-winrm por nombre que resuelve a IPv6.
+
+| Escenario (IPv6) | Detección estricta | Amplia | Precisión | F1 | FP accionables |
+|---|---|---|---|---|---|
+| **E1 — Línea base** | — (sin ataques) | — | — | — | **0** (1631 alertas, 224 con IPv6) |
+| **E2 — Ataques** | **77.5%** (31/40) · **núcleo 5 técnicas 100%** | 100% | **100%** | 87.3% | **0 / 1593** |
+| **E3 — Mixto (bajo carga)** | **100%** (12/12) | 100% | **96.7%** | 98.3% | 21 / 645 |
+
+- Las **5 técnicas MITRE de la metodología se detectan al 100% de forma estricta sobre IPv6** (igual que sobre IPv4), con los objetivos y el `srcip` en direcciones IPv6 (`2600:1f18:11e4:…`).
+- Las variantes de evasión (escaneo sigiloso, SQLi ofuscado) evaden parcialmente, igual que en IPv4 — es un comportamiento **independiente de la familia de direcciones**.
+- **0 falsas alarmas accionables** en la línea base IPv6.
+
+**Conclusión:** la capacidad de detección del SIEM es **equivalente sobre IPv4 e IPv6**. Las fuentes de log (firewall nftables `inet`, Apache, sshd, Sysmon) y las reglas de correlación operan igual con direcciones IPv6, confirmando que el laboratorio es dual-stack de extremo a extremo tanto en la red como en la detección.
+
+### Evidencia complementaria (carpeta `evidencias/`)
+- `evidencia_dualstack_terminal.txt` — conectividad IPv6, HTTP/IPv6, DNS AAAA, firewall registrando IPv6.
+- `evidencia_ataques_terminal.txt` — ejecución de los ataques sobre IPv6 (hydra -6, nmap -6, secretsdump -target-ip, evil-winrm).

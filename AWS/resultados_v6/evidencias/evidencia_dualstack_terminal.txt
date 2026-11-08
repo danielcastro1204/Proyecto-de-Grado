@@ -1,0 +1,34 @@
+===== 1. IPv6 de la instancia (atacante) =====
+    inet6 2600:1f18:11e4:1302:7f18:7eaf:bbb7:23ea/128 scope global dynamic noprefixroute 
+
+===== 2. Conectividad IPv6 entre VLANs (ping6 al web) =====
+PING 2600:1f18:11e4:1300:d032:3b84:dba0:68c8(2600:1f18:11e4:1300:d032:3b84:dba0:68c8) 56 data bytes
+64 bytes from 2600:1f18:11e4:1300:d032:3b84:dba0:68c8: icmp_seq=1 ttl=64 time=0.254 ms
+64 bytes from 2600:1f18:11e4:1300:d032:3b84:dba0:68c8: icmp_seq=2 ttl=64 time=0.256 ms
+64 bytes from 2600:1f18:11e4:1300:d032:3b84:dba0:68c8: icmp_seq=3 ttl=64 time=0.269 ms
+
+--- 2600:1f18:11e4:1300:d032:3b84:dba0:68c8 ping statistics ---
+3 packets transmitted, 3 received, 0% packet loss, time 2037ms
+rtt min/avg/max/mdev = 0.254/0.259/0.269/0.006 ms
+
+===== 3. HTTP sobre IPv6 (curl -6) =====
+HTTP 200 desde IPv6 remota 2600:1f18:11e4:1300:d032:3b84:dba0:68c8
+
+===== 4. Resolucion de nombres dual-stack (getent) =====
+2600:1f18:11e4:1300:d032:3b84:dba0:68c8 STREAM web-server
+2600:1f18:11e4:1300:d032:3b84:dba0:68c8 DGRAM  
+2600:1f18:11e4:1300:d032:3b84:dba0:68c8 RAW    
+10.0.10.10      STREAM 
+10.0.10.10      DGRAM  
+10.0.10.10      RAW    
+10.0.10.10      STREAM 
+10.0.10.10      DGRAM  
+10.0.10.10      RAW    
+
+===== 5. DNS resuelve AAAA (consulta al DNS por su IPv6) =====
+2600:1f18:11e4:1300:d032:3b84:dba0:68c8
+===== 6. Firewall registra conexiones IPv6 (nft inet, SRC=2600) =====
+Nov  8 13:10:34 fw-gateway kernel: [ 5189.902084] FW-SYN: IN=ens5 OUT= MAC=0e:ff:c7:15:3b:ef:0e:ff:f0:1c:fa:eb:86:dd SRC=2600:1f18:11e4:1302:7f18:7eaf:bbb7:23ea DST=2600:1f18:11e4:1302:5383:fd40:27af:a01c LEN=64 TC=0 HOPLIMIT=255 FLOWLBL=0 PROTO=TCP SPT=39052 DPT=135 WINDOW=1024 RES=0x00 SYN URGP=0 
+Nov  8 13:10:34 fw-gateway kernel: [ 5189.902308] FW-NEW-CONN: IN=ens5 OUT= MAC=0e:ff:c7:15:3b:ef:0e:ff:f0:1c:fa:eb:86:dd SRC=2600:1f18:11e4:1302:7f18:7eaf:bbb7:23ea DST=2600:1f18:11e4:1302:5383:fd40:27af:a01c LEN=64 TC=0 HOPLIMIT=255 FLOWLBL=0 PROTO=TCP SPT=39052 DPT=1433 WINDOW=1024 RES=0x00 SYN URGP=0 
+Nov  8 13:10:34 fw-gateway kernel: [ 5189.902316] FW-SYN: IN=ens5 OUT= MAC=0e:ff:c7:15:3b:ef:0e:ff:f0:1c:fa:eb:86:dd SRC=2600:1f18:11e4:1302:7f18:7eaf:bbb7:23ea DST=2600:1f18:11e4:1302:5383:fd40:27af:a01c LEN=64 TC=0 HOPLIMIT=255 FLOWLBL=0 PROTO=TCP SPT=39052 DPT=1433 WINDOW=1024 RES=0x00 SYN URGP=0 
+Nov  8 13:10:34 fw-gateway kernel: [ 5189.902353] FW-SYN: IN=ens5 OUT= MAC=0e:ff:c7:15:3b:ef:0e:ff:f0:1c:fa:eb:86:dd SRC=2600:1f18:11e4:1302:7f18:7eaf:bbb7:23ea DST=2600:1f18:11e4:1302:5383:fd40:27af:a01c LEN=64 TC=0 HOPLIMIT=255 FLOWLBL=0 PROTO=TCP SPT=39052 DPT=5985 WINDOW=1024 RES=0x00 SYN URGP=0 
