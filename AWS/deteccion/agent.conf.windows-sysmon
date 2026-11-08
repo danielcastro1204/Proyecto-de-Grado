@@ -1,0 +1,19 @@
+<agent_config>
+
+  <!-- Shared agent configuration here -->
+
+</agent_config>
+<agent_config os="Windows">
+  <!-- Canal de Sysmon: imprescindible para Event ID 1 (creacion de proceso con
+       linea de comando). Habilita reglas 100050/100051 (payload) y 100031
+       (herramientas de movimiento lateral via Sysmon). -->
+  <localfile>
+    <location>Microsoft-Windows-Sysmon/Operational</location>
+    <log_format>eventchannel</log_format>
+  </localfile>
+  <!-- PowerShell Script Block Logging (refuerzo de deteccion de payload) -->
+  <localfile>
+    <location>Microsoft-Windows-PowerShell/Operational</location>
+    <log_format>eventchannel</log_format>
+  </localfile>
+</agent_config>
